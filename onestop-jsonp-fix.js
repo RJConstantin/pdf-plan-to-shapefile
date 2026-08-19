@@ -2,6 +2,25 @@ const ONESTOP_EXPORT_PREFIX = 'https://extmapviewer.aer.ca/Geocortex/Essentials/
 const nativeFetch = window.fetch.bind(window);
 let callbackCounter = 0;
 
+function normalizeOneStopImageUrl(value) {
+  if (!value || typeof value !== 'string') return value;
+  let url = value.trim();
+  if (url.startsWith('//')) url = `https:${url}`;
+  if (url.startsWith('http://extmapviewer.aer.ca/')) {
+    url = `https://${url.slice('http://'.length)}`;
+  }
+  return url;
+}
+
+function normalizeOneStopResponse(data) {
+  if (!data || typeof data !== 'object') return data;
+  const copy = { ...data };
+  ['href', 'url', 'imageUrl'].forEach((key) => {
+    if (typeof copy[key] === 'string') copy[key] = normalizeOneStopImageUrl(copy[key]);
+  });
+  return copy;
+}
+
 function jsonpOneStop(url) {
   return new Promise((resolve, reject) => {
     const requestUrl = new URL(url);
@@ -23,7 +42,7 @@ function jsonpOneStop(url) {
 
     window[callbackName] = (data) => {
       cleanup();
-      resolve(data);
+      resolve(normalizeOneStopResponse(data));
     };
 
     script.onerror = () => {
@@ -66,12 +85,18 @@ function patchLeafletImageOverlay() {
 
   const originalImageOverlay = window.L.imageOverlay;
   const patched = function imageOverlayWithoutForcedCors(imageUrl, bounds, options) {
+    let finalUrl = imageUrl;
     if (String(imageUrl || '').includes('extmapviewer.aer.ca')) {
+      finalUrl = normalizeOneStopImageUrl(String(imageUrl));
       const safeOptions = { ...(options || {}) };
       delete safeOptions.crossOrigin;
-      return originalImageOverlay.call(window.L, imageUrl, bounds, safeOptions);
+      const overlay = originalImageOverlay.call(window.L, finalUrl, bounds, safeOptions);
+      overlay.once('error', () => {
+        console.error('OneStop disposition image failed to load:', finalUrl);
+      });
+      return overlay;
     }
-    return originalImageOverlay.call(window.L, imageUrl, bounds, options);
+    return originalImageOverlay.call(window.L, finalUrl, bounds, options);
   };
   patched.__oneStopCorsFixed = true;
   window.L.imageOverlay = patched;

@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PDF Plan to Shapefile</title>
-  <link rel="stylesheet" href="./style.css?v=2026.08.19.2">
-  <script type="module" src="./app.js?v=2026.08.19.2"></script>
-  <script type="module" src="./flattened-plan.js?v=2026.08.19.2"></script>
-  <script type="module" src="./coordinate-formats.js?v=2026.08.19.2"></script>
+  <link rel="stylesheet" href="./style.css?v=2026.08.19.3">
+  <script type="module" src="./app.js?v=2026.08.19.3"></script>
+  <script type="module" src="./flattened-plan.js?v=2026.08.19.3"></script>
+  <script type="module" src="./coordinate-formats.js?v=2026.08.19.3"></script>
 </head>
 <body>
   <header class="topbar">
@@ -28,8 +28,8 @@
 
   <section class="hero">
     <div class="eyebrow">Survey plan conversion</div>
-    <h1>Turn a PDF plan into a map-confirmed shapefile.</h1>
-    <p>Upload a D56 or survey plan PDF, use any coordinates or legal-location information available in the plan, verify the proposed boundary on the map, and confirm it before download.</p>
+    <h1>Turn a PDF into a shapefile.</h1>
+    <p>Upload a PDF.</p>
   </section>
 
   <main class="content">
@@ -47,7 +47,7 @@
         <input id="planPdfInput" type="file" accept="application/pdf,.pdf" hidden>
         <label class="dropzone" id="planPdfDrop" for="planPdfInput">
           <span class="upload-arrow">↑</span>
-          <strong id="planPdfName">Drop a survey plan PDF here or click to browse</strong>
+          <strong id="planPdfName">Drop a PDF here or click to browse</strong>
           <span>Digital/vector PDFs are read directly. Flattened image-based plans automatically use an OCR fallback to look for the legal location, dimensions, and bearings.</span>
         </label>
         <div class="status" id="pdfStatus">No PDF loaded.</div>
@@ -123,6 +123,6 @@
   </main>
 
   <footer class="site-disclaimer"><strong>Disclaimer:</strong> These browser based GIS tools are intended for preliminary screening, data preparation and general reference. Results depend on the accuracy, completeness, availability and currency of the source data and services. Verify outputs against the applicable authoritative source before using them for regulatory submissions, surveying, field decisions or other professional work.</footer>
-  <div class="site-version" aria-label="Site version">v2026.08.19.2</div>
+  <div class="site-version" aria-label="Site version">v2026.08.19.3</div>
 </body>
 </html>

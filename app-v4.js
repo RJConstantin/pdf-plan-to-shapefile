@@ -1,4 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
+import { detectLegalLocation } from './plan-parser.mjs';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -178,17 +179,8 @@ function detectPlanInfo(text) {
     }
   }
 
-  const legalPatterns = [
-    /\b(?:LSD\s*)?(\d{1,2})[-\s]+(\d{1,2})[-\s]+(\d{1,3})[-\s]+(\d{1,2})\s*W\s*([456])\s*M?\b/i,
-    /\b(\d{1,2})[-\s]+(\d{1,2})[-\s]+(\d{1,3})[-\s]+(\d{1,2})[-\s]*W?([456])\b/i,
-  ];
-  for (const re of legalPatterns) {
-    const m = text.match(re);
-    if (m) {
-      result.legal = `${Number(m[1])}-${Number(m[2])}-${Number(m[3])}-${Number(m[4])}-W${Number(m[5])}M`;
-      break;
-    }
-  }
+  const legal = detectLegalLocation(text);
+  if (legal) result.legal = legal;
 
   const dims = [...text.matchAll(/\b(\d{2,3}(?:\.\d{1,2})?)\s*(?:m|metres)?\b/gi)]
     .map((m) => Number(m[1]))

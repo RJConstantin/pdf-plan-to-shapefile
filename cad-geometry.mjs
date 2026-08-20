@@ -159,7 +159,7 @@ export function extractHatchRings(paths) {
   return sharedEdgeGroups(cleaned).flatMap(traceBoundaryRings);
 }
 
-function pointOnSegment(point, a, b, tolerance = 0.002) {
+function pointOnSegment(point, a, b, tolerance = 0.05) {
   const dx = b[0] - a[0];
   const dy = b[1] - a[1];
   const lengthSquared = dx * dx + dy * dy;
@@ -168,7 +168,7 @@ function pointOnSegment(point, a, b, tolerance = 0.002) {
   if (t <= tolerance || t >= 1 - tolerance) return null;
   const projected = [a[0] + t * dx, a[1] + t * dy];
   return Math.hypot(point[0] - projected[0], point[1] - projected[1]) <= tolerance
-    ? { point: projected, t }
+    ? { point, t }
     : null;
 }
 

@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.41';
-import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.41';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.41';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.42';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.42';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.42';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -61,7 +61,11 @@ function unionPlanRings(rings, polygonClipping) {
   try {
     const result = polygonClipping.union(...rings.map((ring) => [[closeRing(ring)]]));
     const outerRings = (result || []).map((polygon) => polygon[0]?.slice(0, -1)).filter((ring) => ring?.length >= 3);
-    return outerRings.length ? outerRings : dissolveRings(rings);
+    if (!outerRings.length) return dissolveRings(rings);
+    const edgeDissolved = dissolveRings(outerRings);
+    return edgeDissolved.length && edgeDissolved.length <= outerRings.length
+      ? edgeDissolved
+      : outerRings;
   } catch (error) {
     console.warn('Survey areas could not be unioned; using edge-based dissolve.', error);
     return dissolveRings(rings);

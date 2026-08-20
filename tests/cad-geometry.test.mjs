@@ -56,7 +56,7 @@ test('calibrates an oversized PDF drawing from its printed area', () => {
 test('dissolves adjoining plan areas even when a shared side is split differently', () => {
   const rings = [
     [[0, 0], [100, 0], [100, 100], [0, 100]],
-    [[0, 100], [50, 100], [100, 100], [100, 120], [0, 120]],
+    [[0, 100], [50, 100.01], [100, 100], [100, 120], [0, 120]],
   ];
   const dissolved = dissolveRings(rings);
   assert.equal(dissolved.length, 1);
@@ -64,5 +64,5 @@ test('dissolves adjoining plan areas even when a shared side is split differentl
     const next = dissolved[0][(index + 1) % dissolved[0].length];
     return sum + point[0] * next[1] - next[0] * point[1];
   }, 0) / 2;
-  assert.equal(Math.abs(area), 12000);
+  assert.ok(Math.abs(Math.abs(area) - 12000) < 1);
 });

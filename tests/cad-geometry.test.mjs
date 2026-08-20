@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractHatchRings, matchClosedPathsByArea } from '../cad-geometry.mjs';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from '../cad-geometry.mjs';
 
 test('reconstructs separate pit and access-road outlines from CAD hatch triangles', () => {
   const paths = [
@@ -42,4 +42,13 @@ test('matches unlayered red site and access rings to printed plan areas', () => 
   assert.equal(match.siteRing.length, 4);
   assert.ok(Math.abs(match.hectares[0] - 4.598) < 0.01);
   assert.ok(Math.abs(match.hectares[1] - 3.244) < 0.01);
+});
+
+test('calibrates an oversized PDF drawing from its printed area', () => {
+  const rings = [[[0, 0], [100, 0], [100, 100], [0, 100]]];
+  const baseMetresPerPoint = 5000 * 0.0254 / 72;
+  const targetArea = 10000 * (baseMetresPerPoint * 0.1) ** 2 / 10000;
+  const calibration = calibrateRingsByArea(rings, 5000, targetArea);
+  assert.equal(calibration.correction, 0.1);
+  assert.ok(Math.abs(calibration.hectares - targetArea) < 1e-9);
 });

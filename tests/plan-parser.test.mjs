@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from '../plan-parser.mjs';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from '../plan-parser.mjs';
 
 test('detects the Clear North pad-coded LSD location', () => {
   const text = 'CLEAR NORTH GIFT 5P-18-79-12-5 PAGE 5/7';
@@ -55,6 +55,7 @@ test('detects two adjoining quarter-section anchors from a borrow-pit filename',
 test('uses the overview scale when a plan also contains larger details', () => {
   assert.equal(detectPlanScale('SCALE 1:5000 DETAIL SCALE 1:1000'), 5000);
   assert.equal(detectPlanScale('SCALE 1:2500 OVERVIEW SCALE 1:10 000'), 10000);
+  assert.equal(detectPlanScale('Scale - 1 : 5000 DETAIL Scale - 1 : 500'), 5000);
 });
 
 test('detects proposed coordinates when PDF extraction places values before their labels', () => {
@@ -77,6 +78,20 @@ test('detects sketch-plan areas in visual and PDF extraction order', () => {
   assert.deepEqual(
     detectPlanAreas('= 4.598 ha (11.36 ac.) WELL SITE = 3.244 ha (8.02 ac.) EXISTING ACCESS ROAD = 7.842 ha (19.38 ac.) TOTAL'),
     { site: 4.598, access: 3.244, total: 7.842 }
+  );
+});
+
+test('detects a DLO recreational-trail plan and its area controls', () => {
+  const text = `AS-BUILT DLO RECREATIONAL TRAIL
+    DISPOSITION AREAS DLO: Area outside existing dispositions 0.652 ha Total 0.652 ha
+    2 m ACCESS ROAD = 30.3 km`;
+  assert.deepEqual(detectDloPlan(text), { area: 0.652, width: 2, lengthKm: 30.3 });
+});
+
+test('detects a punctuated DLO section title', () => {
+  assert.equal(
+    detectLegalLocation('N.1/2 & S.E.1/4 Sec.25 Twp.41 - Rge.8 - W.5M.'),
+    'SEC-25-41-8-W5M'
   );
 });
 

@@ -70,7 +70,7 @@ export function detectSectionAnchors(text) {
 
 export function detectPlanScale(text) {
   if (!text) return null;
-  const scales = [...text.matchAll(/\bSCALE\s*1\s*:\s*((?:\d{1,3}[ ,]\d{3})|\d{2,6})\b/gi)]
+  const scales = [...text.matchAll(/\bSCALE\s*[-–—]?\s*1\s*:\s*((?:\d{1,3}[ ,]\d{3})|\d{2,6})\b/gi)]
     .map((match) => Number(match[1].replace(/[ ,]/g, '')))
     .filter((value) => value >= 100 && value <= 100000);
   return scales.length ? Math.max(...scales) : null;
@@ -134,6 +134,23 @@ export function detectPlanAreas(text) {
   return { site, access, total };
 }
 
+export function detectDloPlan(text) {
+  if (!text || !/\bDLO\b/i.test(text) || !/\bRECREATIONAL\s+TRAIL\b/i.test(text)) return null;
+  const source = String(text).replace(/\s+/g, ' ');
+  const dispositionIndex = source.search(/\bDISPOSITION\s+AREAS\b/i);
+  const dispositionBlock = dispositionIndex >= 0
+    ? source.slice(dispositionIndex, dispositionIndex + 700)
+    : source;
+  const area = dispositionBlock.match(/\bTOTAL\s+(\d{1,3}(?:[.,]\d{1,4})?)\s*ha\b/i);
+  const access = source.match(/\b(\d{1,2}(?:[.,]\d+)?)\s*m\s+ACCESS\s+ROAD\s*=\s*(\d{1,3}(?:[.,]\d+)?)\s*km\b/i);
+  if (!area || !access) return null;
+  return {
+    area: Number(area[1].replace(',', '.')),
+    width: Number(access[1].replace(',', '.')),
+    lengthKm: Number(access[2].replace(',', '.')),
+  };
+}
+
 export function detectLegalLocation(text) {
   if (!text) return null;
 
@@ -188,7 +205,7 @@ export function detectLegalLocation(text) {
   if (sectionAnchors.length) return sectionAnchors[0].legal;
 
   const labelledSection = text.match(
-    /\b(?:[NSEW]\s*\.?\s*1\s*\/\s*2\s*)?SEC(?:TION)?\.?\s*(\d{1,2})\s*TWP\.?\s*(\d{1,3})\s*RGE\.?\s*(\d{1,2})\s*W\.?\s*([456])\s*M\.?/i
+    /\b(?:[NSEW]\s*\.?\s*1\s*\/\s*2\s*(?:&\s*[NSEW]\s*\.?\s*1\s*\/\s*[24]\s*)?)?SEC(?:TION)?\.?\s*(\d{1,2})\s*TWP\.?\s*(\d{1,3})\s*[-,]?\s*RGE\.?\s*(\d{1,2})\s*[-,]?\s*W\.?\s*([456])\s*M\.?/i
   );
   if (labelledSection) {
     const section = Number(labelledSection[1]);

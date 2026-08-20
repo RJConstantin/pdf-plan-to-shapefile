@@ -152,3 +152,21 @@ export function matchClosedPathsByArea(paths, planScale, targetAreas, tolerance 
     hectares: selected.map((candidate) => candidate.hectares),
   };
 }
+
+export function calibrateRingsByArea(rings, planScale, targetArea, tolerance = 0.2) {
+  if (!rings?.length || !(Number.isFinite(planScale) && planScale > 0)
+    || !(Number.isFinite(targetArea) && targetArea > 0)) return null;
+  const baseMetresPerPoint = planScale * 0.0254 / 72;
+  const pageArea = rings.reduce((sum, ring) => sum + polygonArea(ring), 0);
+  const options = [1, 0.1, 0.01, 10].map((correction) => {
+    const metresPerPoint = baseMetresPerPoint * correction;
+    const hectares = pageArea * metresPerPoint ** 2 / 10000;
+    return {
+      correction,
+      metresPerPoint,
+      hectares,
+      relativeError: Math.abs(hectares - targetArea) / targetArea,
+    };
+  }).sort((a, b) => a.relativeError - b.relativeError);
+  return options[0].relativeError <= tolerance ? options[0] : null;
+}

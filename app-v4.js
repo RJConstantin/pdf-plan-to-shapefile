@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.15';
-import { extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.15';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.16';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.16';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -8,6 +8,7 @@ const ATS_SERVICE = 'https://geospatial.alberta.ca/titan/rest/services/base/albe
 const ONESTOP_EXPORT = 'https://extmapviewer.aer.ca/Geocortex/Essentials/public/REST/sites/OneStop/map/export';
 const DEFAULT_CENTER = [54.5, -115.0];
 const EPSG3400 = '+proj=tmerc +lat_0=0 +lon_0=-115 +k=0.9992 +x_0=500000 +y_0=0 +datum=NAD83 +units=m +no_defs +type=crs';
+const NAD83_UTM11 = '+proj=utm +zone=11 +datum=NAD83 +units=m +no_defs +type=crs';
 const NAD83_10TM_WKT = 'PROJCS["NAD_1983_10TM_AEP_Forest",GEOGCS["GCS_North_American_1983",DATUM["D_North_American_1983",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],PARAMETER["False_Northing",0.0],PARAMETER["Central_Meridian",-115.0],PARAMETER["Scale_Factor",0.9992],PARAMETER["Latitude_Of_Origin",0.0],UNIT["Meter",1.0]]';
 
 const state = {
@@ -147,6 +148,9 @@ async function handlePdf(file) {
     } else if (cadBoundary?.kind === 'red-site-plan'
       && Number.isFinite(state.detected.lat) && Number.isFinite(state.detected.lon)) {
       state.detected.cadBoundary = cadBoundary;
+    } else if (cadBoundary?.kind === 'dlo-hatch'
+      && Number.isFinite(state.detected.lat) && Number.isFinite(state.detected.lon)) {
+      state.detected.cadBoundary = cadBoundary;
     }
     applyDetectedFields(state.detected);
     renderDetectedInfo(state.detected, doc.numPages);
@@ -162,6 +166,8 @@ async function handlePdf(file) {
       await buildCadHatchBoundaryFromDetected();
     } else if (state.detected.cadBoundary?.kind === 'red-site-plan') {
       await buildRedSiteBoundaryFromDetected();
+    } else if (state.detected.cadBoundary?.kind === 'dlo-hatch') {
+      await buildDloBoundaryFromDetected();
     } else if (state.detected.traverse) {
       await buildTraverseFromDetected(located);
     } else if (numberValue('widthInput') && numberValue('heightInput')) {
@@ -220,6 +226,7 @@ function detectPlanInfo(text) {
   result.sectionAnchors = detectSectionAnchors(text);
   result.planScale = detectPlanScale(text);
   result.planAreas = detectPlanAreas(text);
+  result.dloPlan = detectDloPlan(text);
   const legal = result.sectionAnchors[0]?.legal || detectLegalLocation(text);
   if (legal) result.legal = legal;
   result.legalLocations = detectLegalLocations(text);
@@ -407,6 +414,48 @@ function isRedStrokeColor(value) {
   return red >= 0.7 && green <= 0.3 && blue <= 0.3;
 }
 
+function isYellowStrokeColor(value) {
+  if (typeof value === 'string') return /^#ffff7f$/i.test(value.trim());
+  return false;
+}
+
+function isMagentaStrokeColor(value) {
+  if (typeof value === 'string') return /^#ff00ff$/i.test(value.trim());
+  return false;
+}
+
+function polylineLength(points, closed = false) {
+  let length = points.slice(1).reduce((sum, point, index) => (
+    sum + Math.hypot(point[0] - points[index][0], point[1] - points[index][1])
+  ), 0);
+  if (closed && points.length > 2) {
+    length += Math.hypot(points[0][0] - points.at(-1)[0], points[0][1] - points.at(-1)[1]);
+  }
+  return length;
+}
+
+function closestPointOnPolyline(target, points) {
+  let closest = null;
+  let distance = Infinity;
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const denominator = dx * dx + dy * dy;
+    const ratio = denominator > 0
+      ? Math.max(0, Math.min(1, ((target[0] - start[0]) * dx + (target[1] - start[1]) * dy) / denominator))
+      : 0;
+    const point = [start[0] + ratio * dx, start[1] + ratio * dy];
+    const candidateDistance = Math.hypot(target[0] - point[0], target[1] - point[1]);
+    if (candidateDistance < distance) {
+      closest = point;
+      distance = candidateDistance;
+    }
+  }
+  return { point: closest, distance };
+}
+
 function polygonCentroid(points) {
   let crossSum = 0;
   let xSum = 0;
@@ -438,10 +487,38 @@ async function extractCadProposedBoundary(doc, detected = {}) {
     const hatchPaths = [];
     const sectionSegments = [];
     const redPaths = [];
+    const dloYellowPaths = [];
+    const dloRedPaths = [];
+    const dloMagentaPaths = [];
+    const dloCoordinateLabels = [];
+    const pageSizes = new Map();
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
       const page = await doc.getPage(pageNumber);
       const operatorList = await page.getOperatorList();
       const viewport = page.getViewport({ scale: 1 });
+      pageSizes.set(pageNumber, { width: viewport.width, height: viewport.height });
+      if (detected.dloPlan && Number.isFinite(detected.lat) && Number.isFinite(detected.lon)) {
+        const textContent = await page.getTextContent();
+        const locatedItems = textContent.items.map((item) => {
+          const value = Number(String(item.str || '').replace(/[^0-9.-]/g, ''));
+          const point = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+          return { value, point };
+        });
+        const latItems = locatedItems.filter((item) => Math.abs(item.value - detected.lat) < 0.00001);
+        const lonItems = locatedItems.filter((item) => Math.abs(item.value - detected.lon) < 0.00001);
+        latItems.forEach((latItem) => {
+          const lonItem = lonItems.slice().sort((a, b) => (
+            Math.hypot(a.point[0] - latItem.point[0], a.point[1] - latItem.point[1])
+            - Math.hypot(b.point[0] - latItem.point[0], b.point[1] - latItem.point[1])
+          ))[0];
+          if (lonItem && Math.hypot(lonItem.point[0] - latItem.point[0], lonItem.point[1] - latItem.point[1]) < 120) {
+            dloCoordinateLabels.push({
+              pageNumber,
+              point: [(latItem.point[0] + lonItem.point[0]) / 2, (latItem.point[1] + lonItem.point[1]) / 2],
+            });
+          }
+        });
+      }
       const names = Object.fromEntries(Object.entries(pdfjsLib.OPS).map(([name, code]) => [code, name]));
       const graphicsStack = [];
       const markedContent = [];
@@ -473,6 +550,10 @@ async function extractCadProposedBoundary(doc, detected = {}) {
           markedContent.pop();
         } else if (name === 'constructPath') {
           const details = parseConstructedSubpathDetails(args, matrix);
+          const screenDetails = detected.dloPlan ? details.map(({ points, closed }) => ({
+            closed,
+            points: points.map((point) => viewport.convertToViewportPoint(point[0], point[1])),
+          })) : null;
           const activeLayer = markedContent.at(-1);
           if (proposedLayerId && activeLayer === proposedLayerId) {
             const points = details.flatMap((path) => path.points);
@@ -501,6 +582,19 @@ async function extractCadProposedBoundary(doc, detected = {}) {
                   points: points.map((point) => viewport.convertToViewportPoint(point[0], point[1])),
                 });
               }
+            });
+            screenDetails?.forEach(({ points, closed }) => {
+              if (points.length >= 2) dloRedPaths.push({ pageNumber, points, closed });
+            });
+          }
+          if (isYellowStrokeColor(strokeColor)) {
+            screenDetails?.forEach(({ points, closed }) => {
+              if (closed && points.length >= 3) dloYellowPaths.push({ pageNumber, points });
+            });
+          }
+          if (isMagentaStrokeColor(strokeColor)) {
+            screenDetails?.forEach(({ points, closed }) => {
+              if (points.length >= 2) dloMagentaPaths.push({ pageNumber, points, closed });
             });
           }
         }
@@ -576,15 +670,80 @@ async function extractCadProposedBoundary(doc, detected = {}) {
     }
 
     const redMatch = matchClosedPathsByArea(redPaths, detected.planScale, detected.planAreas);
-    if (!redMatch) return null;
-    return {
-      kind: 'red-site-plan',
-      pageNumber: redMatch.pageNumber,
-      points: redMatch.rings.flat(),
-      rings: redMatch.rings,
-      siteCenter: polygonCentroid(redMatch.siteRing),
-      hectares: redMatch.hectares,
-    };
+    if (redMatch) {
+      return {
+        kind: 'red-site-plan',
+        pageNumber: redMatch.pageNumber,
+        points: redMatch.rings.flat(),
+        rings: redMatch.rings,
+        siteCenter: polygonCentroid(redMatch.siteRing),
+        hectares: redMatch.hectares,
+      };
+    }
+
+    if (detected.dloPlan && dloYellowPaths.length && dloCoordinateLabels.length) {
+      const coordinateLabel = dloCoordinateLabels.slice().sort((a, b) => a.point[0] - b.point[0])[0];
+      const pageNumber = coordinateLabel.pageNumber;
+      const pageSize = pageSizes.get(pageNumber);
+      const redOutlines = dloRedPaths
+        .filter((path) => path.pageNumber === pageNumber && !path.closed
+          && polylineLength(path.points) > pageSize.width * 0.05);
+      const leader = dloMagentaPaths
+        .filter((path) => path.pageNumber === pageNumber && !path.closed && path.points.length >= 3)
+        .map((path) => ({
+          ...path,
+          proximity: Math.min(...path.points.map((point) => (
+            Math.hypot(point[0] - coordinateLabel.point[0], point[1] - coordinateLabel.point[1])
+          ))),
+        }))
+        .filter((path) => path.proximity < 120)
+        .sort((a, b) => b.points.length - a.points.length)[0];
+      if (redOutlines.length >= 2 && leader) {
+        const leaderEnds = [leader.points[0], leader.points.at(-1)];
+        const leaderPoint = leaderEnds.sort((a, b) => (
+          Math.hypot(b[0] - coordinateLabel.point[0], b[1] - coordinateLabel.point[1])
+          - Math.hypot(a[0] - coordinateLabel.point[0], a[1] - coordinateLabel.point[1])
+        ))[0];
+        const controls = redOutlines
+          .map((path) => closestPointOnPolyline(leaderPoint, path.points))
+          .filter((control) => control.point)
+          .sort((a, b) => a.distance - b.distance)
+          .slice(0, 2);
+        if (controls.length === 2 && controls[1].distance < 150) {
+          const sourceAnchor = [
+            (controls[0].point[0] + controls[1].point[0]) / 2,
+            (controls[0].point[1] + controls[1].point[1]) / 2,
+          ];
+          const outlinePoints = redOutlines.flatMap((path) => path.points);
+          const drawingBounds = pointBounds(outlinePoints);
+          const rings = extractHatchRings(dloYellowPaths
+            .filter((path) => path.pageNumber === pageNumber)
+            .map((path) => path.points))
+            .filter((ring) => {
+              const center = polygonCentroid(ring);
+              return center[0] >= drawingBounds[0] && center[0] <= drawingBounds[2]
+                && center[1] >= drawingBounds[1] && center[1] <= drawingBounds[3];
+            });
+          const calibration = calibrateRingsByArea(rings, detected.planScale, detected.dloPlan.area);
+          if (calibration) {
+            const significantRings = rings.filter((ring) => (
+              polygonArea(ring) * calibration.metresPerPoint ** 2 >= 0.2
+            ));
+            return {
+              kind: 'dlo-hatch',
+              pageNumber,
+              points: significantRings.flat(),
+              rings: significantRings,
+              sourceAnchor,
+              metresPerPoint: calibration.metresPerPoint,
+              scaleCorrection: calibration.correction,
+              hectares: calibration.hectares,
+            };
+          }
+        }
+      }
+    }
+    return null;
   } catch (err) {
     console.warn('A proposed CAD layer could not be extracted.', err);
     return null;
@@ -773,6 +932,7 @@ function renderDetectedInfo(info, pages) {
   if (Number.isFinite(info.width) && Number.isFinite(info.height)) found.push(`<strong>Likely dimensions:</strong> ${info.width} m × ${info.height} m`);
   if (Number.isFinite(info.planScale)) found.push(`<strong>Overview scale:</strong> 1:${info.planScale.toLocaleString()}`);
   if (Number.isFinite(info.planAreas?.total)) found.push(`<strong>Printed total area:</strong> ${info.planAreas.total.toFixed(3)} ha`);
+  if (info.dloPlan) found.push(`<strong>DLO trail:</strong> ${info.dloPlan.width} m access road, ${info.dloPlan.lengthKm} km stated length, ${info.dloPlan.area.toFixed(3)} ha disposition area`);
   if (info.sectionAnchors?.length > 1) {
     found.push(`<strong>ATS anchors:</strong> ${info.sectionAnchors.map((anchor) => `${anchor.part} ${anchor.legal}`).join(' and ')}`);
   }
@@ -780,6 +940,7 @@ function renderDetectedInfo(info, pages) {
   if (info.cadBoundary?.kind === 'corridor') found.push(`<strong>Proposed CAD boundary:</strong> vector layer found between ${escapeHtml(info.legalLocations[0])} and ${escapeHtml(info.legalLocations[1])}`);
   if (info.cadBoundary?.kind === 'site-hatch') found.push('<strong>CAD site boundary:</strong> proposed/as-built hatch boundary and section grid found');
   if (info.cadBoundary?.kind === 'red-site-plan') found.push(`<strong>Sketch boundary:</strong> ${info.cadBoundary.rings.length} area-matched red vector parts found`);
+  if (info.cadBoundary?.kind === 'dlo-hatch') found.push(`<strong>DLO vector boundary:</strong> ${info.cadBoundary.rings.length} yellow corridor parts found and area-calibrated`);
 
   if (!found.length) {
     $('detectedBox').innerHTML = '<strong>No reliable spatial text was detected.</strong><br>This is common with flattened PDFs. Enter the legal location and dimensions shown on the plan, then verify the result on the map.';
@@ -794,6 +955,8 @@ function renderDetectedInfo(info, pages) {
     ? 'The site boundary is extracted from the PDF CAD hatch and aligned from its section lines to Alberta Township System section corners. Confirm the boundary against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'red-site-plan'
     ? 'The site and access boundaries are extracted from closed red PDF vectors, checked against the printed hectare values, and positioned from the proposed-site centre coordinate and overview scale. Confirm them against the plan and imagery before download.'
+    : info.cadBoundary?.kind === 'dlo-hatch'
+    ? 'The DLO corridor is reconstructed from the yellow vector fill between the red survey edges. Its oversized PDF page units are calibrated against the printed disposition area, then the route is positioned from the X1 coordinate in NAD83 UTM Zone 11. Confirm the route against the plan and imagery before download.'
     : info.traverse
     ? 'The pad boundary will be reconstructed from the survey calls and positioned from the legal-land tie. Confirm it against the plan and imagery before download.'
     : sectionOnly
@@ -806,6 +969,7 @@ function confidenceLabel(info) {
   if (info.cadBoundary?.kind === 'corridor' && info.legalLocations?.length >= 2) return 'Proposed CAD corridor and two legal anchors found';
   if (info.cadBoundary?.kind === 'site-hatch' && info.legal) return 'CAD site boundary and ATS section control found';
   if (info.cadBoundary?.kind === 'red-site-plan') return 'Area-matched sketch vectors and site centre found';
+  if (info.cadBoundary?.kind === 'dlo-hatch') return 'DLO corridor vectors, area control, and X1 anchor found';
   if (info.traverse && info.legal) return 'Survey traverse and legal tie found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon) && info.legal) return 'Good spatial anchors found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) return 'Coordinate found';
@@ -1163,6 +1327,34 @@ async function buildRedSiteBoundaryFromDetected() {
   } catch (err) {
     console.error('The red sketch boundary could not be positioned.', err);
     setPdfStatus(`The red sketch boundary was found, but it could not be positioned: ${err.message || err}`);
+  }
+}
+
+async function buildDloBoundaryFromDetected() {
+  const cad = state.detected.cadBoundary;
+  const lat = state.detected.lat;
+  const lon = state.detected.lon;
+  if (!cad?.sourceAnchor || !cad.rings?.length || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+  try {
+    const targetAnchor = window.proj4('EPSG:4326', NAD83_UTM11, [lon, lat]);
+    const transformPoint = (point) => {
+      const metres = [
+        targetAnchor[0] + (point[0] - cad.sourceAnchor[0]) * cad.metresPerPoint,
+        targetAnchor[1] - (point[1] - cad.sourceAnchor[1]) * cad.metresPerPoint,
+      ];
+      const [pointLon, pointLat] = window.proj4(NAD83_UTM11, 'EPSG:4326', metres);
+      return [pointLat, pointLon];
+    };
+    const rings = cad.rings.map((ring) => ring.map(transformPoint));
+    const corners = rings.length === 1 ? rings[0] : rings.map((ring) => [ring]);
+    const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
+    replaceBoundary(layer);
+    state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 16 });
+    setPdfStatus(`DLO trail boundary reconstructed from ${rings.length} vector corridor parts and positioned from the X1 crossing coordinate in NAD83 UTM Zone 11. Vector area ${cad.hectares.toFixed(3)} ha; plan disposition area ${state.detected.dloPlan.area.toFixed(3)} ha. Verify the orange boundary before confirming.`);
+  } catch (err) {
+    console.error('The DLO trail boundary could not be positioned.', err);
+    setPdfStatus(`The DLO trail vectors were found, but they could not be positioned: ${err.message || err}`);
   }
 }
 

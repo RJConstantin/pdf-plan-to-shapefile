@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.32';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.32';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.32';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.33';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.33';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.33';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -1277,9 +1277,9 @@ function findCadSectionControls(cad) {
   return startControl && endControl ? [startControl, endControl] : null;
 }
 
-function chooseVerticalControl(lines, bounds, center, eastSide) {
-  if (eastSide === true) return lines.slice().sort((a, b) => b.reference - a.reference)[0];
-  if (eastSide === false) return lines.slice().sort((a, b) => a.reference - b.reference)[0];
+function chooseVerticalControl(lines, bounds, center, eastSide, useOuterBoundary = false) {
+  if (useOuterBoundary && eastSide === true) return lines.slice().sort((a, b) => b.reference - a.reference)[0];
+  if (useOuterBoundary && eastSide === false) return lines.slice().sort((a, b) => a.reference - b.reference)[0];
   const preferred = eastSide === true
     ? lines.filter((line) => line.reference >= bounds[2])
     : eastSide === false
@@ -1290,9 +1290,9 @@ function chooseVerticalControl(lines, bounds, center, eastSide) {
       .sort((a, b) => Math.abs(a.reference - center) - Math.abs(b.reference - center))[0];
 }
 
-function chooseHorizontalControl(lines, bounds, center, northSide) {
-  if (northSide === true) return lines.slice().sort((a, b) => a.reference - b.reference)[0];
-  if (northSide === false) return lines.slice().sort((a, b) => b.reference - a.reference)[0];
+function chooseHorizontalControl(lines, bounds, center, northSide, useOuterBoundary = false) {
+  if (useOuterBoundary && northSide === true) return lines.slice().sort((a, b) => a.reference - b.reference)[0];
+  if (useOuterBoundary && northSide === false) return lines.slice().sort((a, b) => b.reference - a.reference)[0];
   const preferred = northSide === true
     ? lines.filter((line) => line.reference <= bounds[1])
     : northSide === false
@@ -1335,13 +1335,14 @@ function findCadHatchSectionControl(cad, anchors = []) {
     ? anchors[0].eastSide : null;
   const commonNorthSide = anchors.length && anchors.every((anchor) => anchor.northSide === anchors[0].northSide)
     ? anchors[0].northSide : null;
+  const useOuterBoundary = anchors.length === 1 && /^(?:NE|NW|SE|SW)$/.test(anchors[0].part || '');
 
   const vertical = sharedEastWest
     ? verticals.slice().sort((a, b) => Math.abs(a.reference - centerX) - Math.abs(b.reference - centerX))[0]
-    : chooseVerticalControl(verticals, bounds, centerX, commonEastSide);
+    : chooseVerticalControl(verticals, bounds, centerX, commonEastSide, useOuterBoundary);
   const horizontal = sharedNorthSouth
     ? horizontals.slice().sort((a, b) => Math.abs(a.reference - centerY) - Math.abs(b.reference - centerY))[0]
-    : chooseHorizontalControl(horizontals, bounds, centerY, commonNorthSide);
+    : chooseHorizontalControl(horizontals, bounds, centerY, commonNorthSide, useOuterBoundary);
   if (!vertical || !horizontal) return null;
   const sourceAnchor = intersectGridLines(vertical, horizontal);
   return sourceAnchor ? {

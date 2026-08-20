@@ -18,6 +18,11 @@ test('preserves standard LSD location detection', () => {
   assert.equal(detectLegalLocation('11-15-73-17-4'), '11-15-73-17-W4M');
 });
 
+test('prioritizes the well-centre legal location over nearby survey controls', () => {
+  const text = 'N1/4 36-92-13W4 WELLCENTER (Within MSL260395) SUNCOR DW2 DOVER 14-2-92-12 within Theoretical NW 2, Twp. 92, Rge. 12, West of the 4th Meridian';
+  assert.equal(detectLegalLocation(text), '14-2-92-12-W4M');
+});
+
 test('detects an explicit section location', () => {
   assert.equal(detectLegalLocation('SEC-18-79-12-W5M'), 'SEC-18-79-12-W5M');
 });

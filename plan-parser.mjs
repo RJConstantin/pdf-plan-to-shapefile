@@ -154,6 +154,17 @@ export function detectDloPlan(text) {
 export function detectLegalLocation(text) {
   if (!text) return null;
 
+  const wellCentreLocation = text.match(
+    /\bWELL\s*CENT(?:ER|RE)\b[\s\S]{0,220}?\b(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,3})\s*-\s*(\d{1,2})\b[\s\S]{0,160}?\bWEST\s+OF\s+(?:THE\s+)?([456])(?:ST|ND|RD|TH)?\s+MERIDIAN\b/i
+  );
+  if (wellCentreLocation) {
+    const values = wellCentreLocation.slice(1, 6).map(Number);
+    if (validLsd(...values)) {
+      const [lsd, section, township, range, meridian] = values;
+      return `${lsd}-${section}-${township}-${range}-W${meridian}M`;
+    }
+  }
+
   const padLocation = text.match(
     /\b(\d{1,2})\s*[A-Z]\s*-\s*(\d{1,2})\s*-\s*(\d{1,3})\s*-\s*(\d{1,2})\s*-\s*W?\s*([456])\s*M?\b/i
   );

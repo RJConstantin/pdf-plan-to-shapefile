@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.25';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.25';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.25';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.26';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.26';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.26';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -1298,6 +1298,8 @@ function renderDetectedInfo(info, pages) {
     ? 'The site boundary is extracted from the PDF CAD hatch and aligned from its section lines to Alberta Township System section corners. Confirm the boundary against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'red-site-plan'
     ? 'The site and access boundaries are extracted from closed red PDF vectors, checked against the printed hectare values, and positioned from the proposed-site centre coordinate and overview scale. Confirm them against the plan and imagery before download.'
+    : info.cadBoundary?.kind === 'generic-site-plan' && info.cadBoundary.sourceKind === 'prominent-vector'
+    ? 'The selected outline is the strongest closed plan vector based on its colour, size, closure, and geometry. It is positioned from the plan coordinate and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.'
     : info.cadBoundary?.kind === 'generic-site-plan'
     ? 'The selected outline is extracted from closed PDF vectors, checked against the printed hectare values, and positioned from the plan coordinate and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.'
     : info.cadBoundary?.kind === 'dlo-hatch' && info.cadBoundary.sourceKind === 'overall-view'

@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.17';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.17';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.18';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.18';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -684,6 +684,85 @@ async function extractCadProposedBoundary(doc, detected = {}) {
     }
 
     if (detected.dloPlan && dloYellowPaths.length && dloCoordinateLabels.length) {
+      const overviewCandidates = [];
+      for (const coordinateLabel of dloCoordinateLabels) {
+        const pageNumber = coordinateLabel.pageNumber;
+        const pageSize = pageSizes.get(pageNumber);
+        const leader = dloMagentaPaths
+          .filter((path) => path.pageNumber === pageNumber && !path.closed && path.points.length >= 3)
+          .map((path) => ({
+            ...path,
+            proximity: Math.min(...path.points.map((point) => (
+              Math.hypot(point[0] - coordinateLabel.point[0], point[1] - coordinateLabel.point[1])
+            ))),
+          }))
+          .filter((path) => path.proximity < 120)
+          .sort((a, b) => b.points.length - a.points.length)[0];
+        if (!leader) continue;
+
+        const leaderEnds = [leader.points[0], leader.points.at(-1)];
+        const leaderPoint = leaderEnds.sort((a, b) => (
+          Math.hypot(b[0] - coordinateLabel.point[0], b[1] - coordinateLabel.point[1])
+          - Math.hypot(a[0] - coordinateLabel.point[0], a[1] - coordinateLabel.point[1])
+        ))[0];
+        const overviewOutline = dloRedPaths
+          .filter((path) => path.pageNumber === pageNumber && path.closed)
+          .map((path) => ({
+            ...path,
+            bounds: pointBounds(path.points),
+            length: polylineLength(path.points, true),
+          }))
+          .filter((path) => {
+            const [minX, minY, maxX, maxY] = path.bounds;
+            return path.length > pageSize.width * 0.04
+              && maxX - minX < pageSize.width * 0.2
+              && maxY - minY < pageSize.height * 0.4
+              && leaderPoint[0] >= minX && leaderPoint[0] <= maxX
+              && leaderPoint[1] >= minY && leaderPoint[1] <= maxY;
+          })
+          .sort((a, b) => b.length - a.length)[0];
+        if (!overviewOutline) continue;
+
+        const [minX, minY, maxX, maxY] = overviewOutline.bounds;
+        const rings = extractHatchRings(dloYellowPaths
+          .filter((path) => path.pageNumber === pageNumber)
+          .map((path) => path.points))
+          .filter((ring) => {
+            const center = polygonCentroid(ring);
+            return center[0] >= minX && center[0] <= maxX
+              && center[1] >= minY && center[1] <= maxY;
+          });
+        const calibration = calibrateRingsByArea(rings, detected.planScale, detected.dloPlan.area);
+        if (!calibration || Math.abs(calibration.correction - 1) > 1e-9) continue;
+        const significantRings = rings.filter((ring) => (
+          polygonArea(ring) * calibration.metresPerPoint ** 2 >= 0.2
+        ));
+        overviewCandidates.push({
+          rings: significantRings,
+          pageNumber,
+          sourceAnchor: leaderPoint,
+          metresPerPoint: calibration.metresPerPoint,
+          scaleCorrection: calibration.correction,
+          hectares: calibration.hectares,
+          areaError: Math.abs(calibration.hectares - detected.dloPlan.area),
+        });
+      }
+      overviewCandidates.sort((a, b) => a.areaError - b.areaError || b.rings.length - a.rings.length);
+      if (overviewCandidates.length) {
+        const overview = overviewCandidates[0];
+        return {
+          kind: 'dlo-hatch',
+          sourceKind: 'overall-view',
+          pageNumber: overview.pageNumber,
+          points: overview.rings.flat(),
+          rings: overview.rings,
+          sourceAnchor: overview.sourceAnchor,
+          metresPerPoint: overview.metresPerPoint,
+          scaleCorrection: overview.scaleCorrection,
+          hectares: overview.hectares,
+        };
+      }
+
       const coordinateLabel = dloCoordinateLabels.slice().sort((a, b) => a.point[0] - b.point[0])[0];
       const pageNumber = coordinateLabel.pageNumber;
       const pageSize = pageSizes.get(pageNumber);
@@ -942,7 +1021,10 @@ function renderDetectedInfo(info, pages) {
   if (info.cadBoundary?.kind === 'corridor') found.push(`<strong>Proposed CAD boundary:</strong> vector layer found between ${escapeHtml(info.legalLocations[0])} and ${escapeHtml(info.legalLocations[1])}`);
   if (info.cadBoundary?.kind === 'site-hatch') found.push('<strong>CAD site boundary:</strong> proposed/as-built hatch boundary and section grid found');
   if (info.cadBoundary?.kind === 'red-site-plan') found.push(`<strong>Sketch boundary:</strong> ${info.cadBoundary.rings.length} area-matched red vector parts found`);
-  if (info.cadBoundary?.kind === 'dlo-hatch') found.push(`<strong>DLO vector boundary:</strong> ${info.cadBoundary.rings.length} yellow corridor parts found and area-calibrated`);
+  if (info.cadBoundary?.kind === 'dlo-hatch') {
+    const source = info.cadBoundary.sourceKind === 'overall-view' ? ' from the complete overall view' : '';
+    found.push(`<strong>DLO vector boundary:</strong> ${info.cadBoundary.rings.length} yellow corridor parts${source} found and area-calibrated`);
+  }
 
   if (!found.length) {
     $('detectedBox').innerHTML = '<strong>No reliable spatial text was detected.</strong><br>This is common with flattened PDFs. Enter the legal location and dimensions shown on the plan, then verify the result on the map.';
@@ -957,6 +1039,8 @@ function renderDetectedInfo(info, pages) {
     ? 'The site boundary is extracted from the PDF CAD hatch and aligned from its section lines to Alberta Township System section corners. Confirm the boundary against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'red-site-plan'
     ? 'The site and access boundaries are extracted from closed red PDF vectors, checked against the printed hectare values, and positioned from the proposed-site centre coordinate and overview scale. Confirm them against the plan and imagery before download.'
+    : info.cadBoundary?.kind === 'dlo-hatch' && info.cadBoundary.sourceKind === 'overall-view'
+    ? 'The DLO corridor is reconstructed from the complete overall-view geometry in the top-right plan panel, preserving the connection across the river. It is positioned from the X1 coordinate in NAD83 UTM Zone 11. Confirm the route against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'dlo-hatch'
     ? 'The DLO corridor is reconstructed from the yellow vector fill between the red survey edges. Its oversized PDF page units are calibrated against the printed disposition area, then the route is positioned from the X1 coordinate in NAD83 UTM Zone 11. Confirm the route against the plan and imagery before download.'
     : info.traverse
@@ -1363,7 +1447,8 @@ async function buildDloBoundaryFromDetected() {
     replaceBoundary(layer);
     layer.bringToFront();
     state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 16 });
-    setPdfStatus(`DLO trail boundary drawn in bright orange from ${rings.length} vector corridor parts and positioned from the X1 crossing coordinate in NAD83 UTM Zone 11. Vector area ${cad.hectares.toFixed(3)} ha; plan disposition area ${state.detected.dloPlan.area.toFixed(3)} ha. Verify the boundary before confirming.`);
+    const source = cad.sourceKind === 'overall-view' ? 'complete overall-view' : 'detailed-plan';
+    setPdfStatus(`DLO trail boundary drawn in bright orange from ${rings.length} ${source} vector corridor parts and positioned from the X1 crossing coordinate in NAD83 UTM Zone 11. Vector area ${cad.hectares.toFixed(3)} ha; plan disposition area ${state.detected.dloPlan.area.toFixed(3)} ha. Verify the boundary before confirming.`);
   } catch (err) {
     console.error('The DLO trail boundary could not be positioned.', err);
     setPdfStatus(`The DLO trail vectors were found, but they could not be positioned: ${err.message || err}`);

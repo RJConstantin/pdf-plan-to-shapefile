@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectLegalLocation } from './plan-parser.mjs';
+import { detectExplicitDimensions, detectLegalLocation } from './plan-parser.mjs';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -138,8 +138,13 @@ async function handlePdf(file) {
       : `Loaded ${doc.numPages} page${doc.numPages === 1 ? '' : 's'}. Little or no extractable text was found. Enter the legal location and plan dimensions, then position the boundary on the map.`);
     $('pdfConfidence').textContent = confidenceLabel(state.detected);
 
-    await locateFromFields();
-    if (numberValue('widthInput') && numberValue('heightInput')) buildRectangleFromFields();
+    const located = await locateFromFields();
+    if (numberValue('widthInput') && numberValue('heightInput')) {
+      buildRectangleFromFields();
+    } else if (located && state.detected.legal
+      && !Number.isFinite(state.detected.lat) && !Number.isFinite(state.detected.lon)) {
+      setPdfStatus('Section found, but this PDF page has no coordinate anchor or explicit pad dimensions. The map is centred on the section for reference only. Draw the boundary on the map or enter known coordinates and dimensions.');
+    }
   } catch (err) {
     console.error(err);
     setPdfStatus(`The PDF could not be read: ${err.message || err}`);
@@ -182,17 +187,10 @@ function detectPlanInfo(text) {
   const legal = detectLegalLocation(text);
   if (legal) result.legal = legal;
 
-  const dims = [...text.matchAll(/\b(\d{2,3}(?:\.\d{1,2})?)\s*(?:m|metres)?\b/gi)]
-    .map((m) => Number(m[1]))
-    .filter((v) => v >= 20 && v <= 500);
-  if (dims.length) {
-    const counts = new Map();
-    dims.forEach((v) => counts.set(v, (counts.get(v) || 0) + 1));
-    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
-    if (ranked[0]?.[1] >= 2) {
-      result.width = ranked[0][0];
-      result.height = ranked[0][0];
-    }
+  const dimensions = detectExplicitDimensions(text);
+  if (dimensions) {
+    result.width = dimensions.width;
+    result.height = dimensions.height;
   }
 
   return result;
@@ -222,7 +220,12 @@ function renderDetectedInfo(info, pages) {
     return;
   }
 
-  $('detectedBox').innerHTML = `<strong>Detected from PDF (${pages} page${pages === 1 ? '' : 's'}):</strong><br>${found.join('<br>')}<br><span class="detected-note">These values are a starting point only. Map confirmation is still required.</span>`;
+  const sectionOnly = info.legal?.startsWith('SEC-')
+    && !Number.isFinite(info.lat) && !Number.isFinite(info.lon);
+  const note = sectionOnly
+    ? 'This identifies the section only. The PDF page does not provide an exact coordinate anchor, so the site position and boundary must be confirmed manually.'
+    : 'These values are a starting point only. Map confirmation is still required.';
+  $('detectedBox').innerHTML = `<strong>Detected from PDF (${pages} page${pages === 1 ? '' : 's'}):</strong><br>${found.join('<br>')}<br><span class="detected-note">${note}</span>`;
 }
 
 function confidenceLabel(info) {

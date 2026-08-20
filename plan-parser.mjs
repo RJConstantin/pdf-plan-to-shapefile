@@ -58,3 +58,30 @@ export function detectLegalLocation(text) {
 
   return null;
 }
+
+export function detectExplicitDimensions(text) {
+  if (!text) return null;
+
+  const dimensionPair = text.match(
+    /\b(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:M|METRES?)?\s*[X×]\s*(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:M|METRES?)?\b/i
+  );
+  if (dimensionPair) {
+    const width = Number(dimensionPair[1].replace(',', '.'));
+    const height = Number(dimensionPair[2].replace(',', '.'));
+    if (width >= 20 && width <= 500 && height >= 20 && height <= 500) {
+      return { width, height };
+    }
+  }
+
+  const widthMatch = text.match(/\bWIDTH\s*:?\s*(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:M|METRES?)?\b/i);
+  const heightMatch = text.match(/\b(?:HEIGHT|LENGTH)\s*:?\s*(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:M|METRES?)?\b/i);
+  if (widthMatch && heightMatch) {
+    const width = Number(widthMatch[1].replace(',', '.'));
+    const height = Number(heightMatch[1].replace(',', '.'));
+    if (width >= 20 && width <= 500 && height >= 20 && height <= 500) {
+      return { width, height };
+    }
+  }
+
+  return null;
+}

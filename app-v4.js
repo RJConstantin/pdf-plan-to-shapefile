@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.23';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.23';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.23';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.24';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.24';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.24';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -164,11 +164,13 @@ async function handlePdf(file) {
       $('pdfConfidence').textContent = confidenceLabel(state.detected);
     }
 
-    const located = await locateFromFields();
     if (state.boundaryCandidates.length) {
-      const count = state.boundaryCandidates.length;
-      setPdfStatus(`Found ${count} boundary candidate${count === 1 ? '' : 's'}. Review the shape preview and choose one before mapping.`);
-    } else if (state.detected.traverse) {
+      await selectBoundaryCandidate(state.boundaryCandidates[0].id);
+      return;
+    }
+
+    const located = await locateFromFields();
+    if (state.detected.traverse) {
       await buildTraverseFromDetected(located);
     } else if (numberValue('widthInput') && numberValue('heightInput')) {
       buildRectangleFromFields();

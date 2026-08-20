@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.9';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.10';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -369,6 +369,12 @@ async function extractCadProposedBoundary(doc) {
     const proposedLayerId = order.find((id) => /^P-PROPOSED$/i.test(config.getGroup(id)?.name || ''));
     const proposedHatchLayerId = order.find((id) => /^P-PROPOSED-H$/i.test(config.getGroup(id)?.name || ''));
     const sectionLayerId = order.find((id) => /^L-USEC$/i.test(config.getGroup(id)?.name || ''));
+    console.info('[CAD debug layers]', JSON.stringify({
+      proposedLayerId,
+      proposedHatchLayerId,
+      sectionLayerId,
+      layerNames: order.map((id) => config.getGroup(id)?.name || '').filter(Boolean),
+    }));
     if (!proposedLayerId && !proposedHatchLayerId) return null;
 
     const candidates = [];
@@ -411,6 +417,7 @@ async function extractCadProposedBoundary(doc) {
         }
       }
     }
+    console.info('[CAD debug paths]', JSON.stringify({ candidates: candidates.length, hatchPaths: hatchPaths.length, sectionSegments: sectionSegments.length }));
     if (!candidates.length && !hatchPaths.length) return null;
 
     if (!candidates.length) {

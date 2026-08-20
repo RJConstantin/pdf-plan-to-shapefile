@@ -1,5 +1,6 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.11';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.13';
+import { extractHatchRings } from './cad-geometry.mjs?v=2026.08.20.13';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -207,6 +208,8 @@ function detectPlanInfo(text) {
   if (legal) result.legal = legal;
   result.legalLocations = detectLegalLocations(text);
   if (!result.legal && result.legalLocations.length) result.legal = result.legalLocations[0];
+  result.sectionAnchors = detectSectionAnchors(text);
+  result.planScale = detectPlanScale(text);
 
   const dimensions = detectExplicitDimensions(text);
   if (dimensions) {
@@ -238,17 +241,31 @@ function matrixPoint(matrix, point) {
   ];
 }
 
-function parseConstructedPath(args, matrix) {
+function parseConstructedSubpaths(args, matrix) {
   let pathData = args?.[1];
   if (Array.isArray(pathData) && pathData.length === 1) [pathData] = pathData;
   const values = pathData && typeof pathData.length === 'number'
     ? Array.from(pathData)
     : Object.values(pathData || {});
-  const points = [];
+  const paths = [];
+  let points = [];
+  const finishPath = () => {
+    const cleaned = points.filter((point, index) => (
+      index === 0 || Math.hypot(point[0] - points[index - 1][0], point[1] - points[index - 1][1]) > 1e-6
+    ));
+    if (cleaned.length > 2) {
+      const first = cleaned[0];
+      const last = cleaned.at(-1);
+      if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6) cleaned.pop();
+    }
+    if (cleaned.length) paths.push(cleaned);
+    points = [];
+  };
   for (let i = 0; i < values.length;) {
     const command = values[i++];
     if (command === 0 || command === 1) {
       if (i + 1 >= values.length) break;
+      if (command === 0 && points.length) finishPath();
       points.push(matrixPoint(matrix, [Number(values[i]), Number(values[i + 1])]));
       i += 2;
     } else if (command === 2) {
@@ -260,21 +277,18 @@ function parseConstructedPath(args, matrix) {
       points.push(matrixPoint(matrix, [Number(values[i + 2]), Number(values[i + 3])]));
       i += 4;
     } else if (command === 4) {
+      finishPath();
       continue;
     } else {
       break;
     }
   }
+  if (points.length) finishPath();
+  return paths;
+}
 
-  const cleaned = points.filter((point, index) => (
-    index === 0 || Math.hypot(point[0] - points[index - 1][0], point[1] - points[index - 1][1]) > 1e-6
-  ));
-  if (cleaned.length > 2) {
-    const first = cleaned[0];
-    const last = cleaned[cleaned.length - 1];
-    if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6) cleaned.pop();
-  }
-  return cleaned;
+function parseConstructedPath(args, matrix) {
+  return parseConstructedSubpaths(args, matrix).flat();
 }
 
 function pointBounds(points) {
@@ -403,8 +417,9 @@ async function extractCadProposedBoundary(doc) {
             candidates.push({ page, pageNumber, points, span });
           }
         } else if (name === 'constructPath' && proposedHatchLayerId && markedContent.at(-1) === proposedHatchLayerId) {
-          const points = parseConstructedPath(args, matrix);
-          if (points.length >= 3) hatchPaths.push({ page, pageNumber, points });
+          parseConstructedSubpaths(args, matrix).forEach((points) => {
+            if (points.length >= 3) hatchPaths.push({ page, pageNumber, points });
+          });
         } else if (name === 'constructPath' && sectionLayerId && markedContent.at(-1) === sectionLayerId) {
           const points = parseConstructedPath(args, matrix);
           if (points.length === 2) sectionSegments.push({ pageNumber, points });
@@ -428,26 +443,29 @@ async function extractCadProposedBoundary(doc) {
           .map((segment) => segment.points.map((point) => viewport.convertToViewportPoint(point[0], point[1])));
         const sectionPoints = screenSegments.flat();
         const sectionBounds = sectionPoints.length ? pointBounds(sectionPoints) : null;
-        connectedPathGroups(screenPaths).forEach((group) => {
-          if (group.length < 3) return;
-          const hull = convexHull(group.flatMap((path) => path.points));
-          const bounds = pointBounds(hull);
+        const hatchRings = extractHatchRings(screenPaths.map((path) => path.points));
+        connectedPathGroups(hatchRings.map((points) => ({ points }))).forEach((group) => {
+          const rings = group.map((path) => path.points);
+          const allPoints = rings.flat();
+          const bounds = pointBounds(allPoints);
           const center = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2];
           const withinSectionDrawing = sectionBounds
             && center[0] >= sectionBounds[0] && center[0] <= sectionBounds[2]
             && center[1] >= sectionBounds[1] && center[1] <= sectionBounds[3];
-          if (hull.length >= 4 && polygonArea(hull) > 100) {
-            hatchCandidates.push({ pageNumber, hull, screenSegments, withinSectionDrawing, area: polygonArea(hull) });
+          const area = rings.reduce((sum, ring) => sum + polygonArea(ring), 0);
+          if (rings.every((ring) => ring.length >= 3) && area > 100) {
+            hatchCandidates.push({ pageNumber, rings, screenSegments, withinSectionDrawing, area });
           }
         });
       }
-      hatchCandidates.sort((a, b) => Number(b.withinSectionDrawing) - Number(a.withinSectionDrawing) || b.area - a.area);
+      hatchCandidates.sort((a, b) => Number(b.withinSectionDrawing) - Number(a.withinSectionDrawing) || a.area - b.area);
       const hatch = hatchCandidates[0];
       if (!hatch?.withinSectionDrawing) return null;
       return {
         kind: 'site-hatch',
         pageNumber: hatch.pageNumber,
-        points: hatch.hull,
+        points: hatch.rings.flat(),
+        rings: hatch.rings,
         sectionSegments: hatch.screenSegments,
       };
     }
@@ -569,7 +587,29 @@ function findCadSectionControls(cad) {
   return startControl && endControl ? [startControl, endControl] : null;
 }
 
-function findCadHatchSectionControls(cad) {
+function chooseVerticalControl(lines, bounds, center, eastSide) {
+  const preferred = eastSide === true
+    ? lines.filter((line) => line.reference >= bounds[2])
+    : eastSide === false
+    ? lines.filter((line) => line.reference <= bounds[0])
+    : lines.filter((line) => line.reference <= bounds[0] || line.reference >= bounds[2]);
+  return preferred.sort((a, b) => Math.abs(a.reference - center) - Math.abs(b.reference - center))[0]
+    || lines.filter((line) => line.reference <= bounds[0] || line.reference >= bounds[2])
+      .sort((a, b) => Math.abs(a.reference - center) - Math.abs(b.reference - center))[0];
+}
+
+function chooseHorizontalControl(lines, bounds, center, northSide) {
+  const preferred = northSide === true
+    ? lines.filter((line) => line.reference <= bounds[1])
+    : northSide === false
+    ? lines.filter((line) => line.reference >= bounds[3])
+    : lines.filter((line) => line.reference <= bounds[1] || line.reference >= bounds[3]);
+  return preferred.sort((a, b) => Math.abs(a.reference - center) - Math.abs(b.reference - center))[0]
+    || lines.filter((line) => line.reference <= bounds[1] || line.reference >= bounds[3])
+      .sort((a, b) => Math.abs(a.reference - center) - Math.abs(b.reference - center))[0];
+}
+
+function findCadHatchSectionControl(cad, anchors = []) {
   const bounds = pointBounds(cad.points);
   const centerX = (bounds[0] + bounds[2]) / 2;
   const centerY = (bounds[1] + bounds[3]) / 2;
@@ -590,21 +630,33 @@ function findCadHatchSectionControls(cad) {
 
   const verticals = clusterGridLines(verticalItems, 5).map((group) => fitGridLine(group, true));
   const horizontals = clusterGridLines(horizontalItems, 5).map((group) => fitGridLine(group, false));
-  const vertical = verticals
-    .filter((line) => line.reference <= bounds[0] || line.reference >= bounds[2])
-    .sort((a, b) => Math.abs(a.reference - centerX) - Math.abs(b.reference - centerX))[0];
-  const north = horizontals
-    .filter((line) => line.reference <= bounds[1])
-    .sort((a, b) => b.reference - a.reference)[0];
-  const south = horizontals
-    .filter((line) => line.reference >= bounds[3])
-    .sort((a, b) => a.reference - b.reference)[0];
-  if (!vertical || !north || !south || north === south) return null;
-  const northControl = intersectGridLines(vertical, north);
-  const southControl = intersectGridLines(vertical, south);
-  return northControl && southControl ? {
-    sourceControls: [northControl, southControl],
+  const positions = anchors.map((anchor) => sectionGridPosition(anchor.sec));
+  const sameTownship = anchors.length >= 2
+    && anchors.every((anchor) => anchor.twp === anchors[0].twp && anchor.rge === anchors[0].rge && anchor.mer === anchors[0].mer);
+  const sharedNorthSouth = sameTownship && positions[0] && positions[1]
+    && positions[0].column === positions[1].column && Math.abs(positions[0].row - positions[1].row) === 1;
+  const sharedEastWest = sameTownship && positions[0] && positions[1]
+    && positions[0].row === positions[1].row && Math.abs(positions[0].column - positions[1].column) === 1;
+  const commonEastSide = anchors.length && anchors.every((anchor) => anchor.eastSide === anchors[0].eastSide)
+    ? anchors[0].eastSide : null;
+  const commonNorthSide = anchors.length && anchors.every((anchor) => anchor.northSide === anchors[0].northSide)
+    ? anchors[0].northSide : null;
+
+  const vertical = sharedEastWest
+    ? verticals.slice().sort((a, b) => Math.abs(a.reference - centerX) - Math.abs(b.reference - centerX))[0]
+    : chooseVerticalControl(verticals, bounds, centerX, commonEastSide);
+  const horizontal = sharedNorthSouth
+    ? horizontals.slice().sort((a, b) => Math.abs(a.reference - centerY) - Math.abs(b.reference - centerY))[0]
+    : chooseHorizontalControl(horizontals, bounds, centerY, commonNorthSide);
+  if (!vertical || !horizontal) return null;
+  const sourceAnchor = intersectGridLines(vertical, horizontal);
+  return sourceAnchor ? {
+    sourceAnchor,
+    sourceSouthVector: [vertical.slope, -1],
     eastSide: vertical.reference > centerX,
+    northSide: horizontal.reference < centerY,
+    sharedOrientation: sharedNorthSouth ? 'north-south' : sharedEastWest ? 'east-west' : null,
+    positions,
   } : null;
 }
 
@@ -626,6 +678,10 @@ function renderDetectedInfo(info, pages) {
   if (info.legal) found.push(`<strong>Legal location:</strong> ${escapeHtml(info.legal)}`);
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) found.push(`<strong>Coordinate:</strong> ${info.lat.toFixed(6)}, ${info.lon.toFixed(6)}`);
   if (Number.isFinite(info.width) && Number.isFinite(info.height)) found.push(`<strong>Likely dimensions:</strong> ${info.width} m × ${info.height} m`);
+  if (Number.isFinite(info.planScale)) found.push(`<strong>Overview scale:</strong> 1:${info.planScale.toLocaleString()}`);
+  if (info.sectionAnchors?.length > 1) {
+    found.push(`<strong>ATS anchors:</strong> ${info.sectionAnchors.map((anchor) => `${anchor.part} ${anchor.legal}`).join(' and ')}`);
+  }
   if (info.traverse) found.push(`<strong>Survey boundary:</strong> ${info.traverse.segments.length} bearing-and-distance calls`);
   if (info.cadBoundary?.kind === 'corridor') found.push(`<strong>Proposed CAD boundary:</strong> vector layer found between ${escapeHtml(info.legalLocations[0])} and ${escapeHtml(info.legalLocations[1])}`);
   if (info.cadBoundary?.kind === 'site-hatch') found.push('<strong>CAD site boundary:</strong> proposed/as-built hatch boundary and section grid found');
@@ -914,38 +970,56 @@ async function buildCadHatchBoundaryFromDetected() {
   try {
     const legal = parseLegal(legalValue);
     if (!legal || legal.level !== 'section') throw new Error('A valid section location is required.');
-    const control = findCadHatchSectionControls(cad);
+    const anchors = state.detected.sectionAnchors?.length
+      ? state.detected.sectionAnchors
+      : [{ ...legal, legal: legalValue, northSide: null, eastSide: null }];
+    const control = findCadHatchSectionControl(cad, anchors);
     if (!control) throw new Error('The PDF section lines could not be matched to the site boundary.');
-    const section = await queryAtsSection(legal);
-    const startMetres = projectedSectionCorner(section.geometry, control.eastSide, true);
-    const endMetres = projectedSectionCorner(section.geometry, control.eastSide, false);
-    const sourceVector = [
-      control.sourceControls[1][0] - control.sourceControls[0][0],
-      -(control.sourceControls[1][1] - control.sourceControls[0][1]),
-    ];
+    if (!Number.isFinite(state.detected.planScale)) throw new Error('The PDF overview scale could not be read.');
+    const sections = await Promise.all(anchors.slice(0, 2).map(queryAtsSection));
+    let targetAnchor;
+    let referenceEastSide = control.eastSide;
+    if (control.sharedOrientation === 'north-south' && sections.length >= 2) {
+      const firstIsNorth = control.positions[0].row < control.positions[1].row;
+      const firstCorner = projectedSectionCorner(sections[0].geometry, control.eastSide, !firstIsNorth);
+      const secondCorner = projectedSectionCorner(sections[1].geometry, control.eastSide, firstIsNorth);
+      targetAnchor = [(firstCorner[0] + secondCorner[0]) / 2, (firstCorner[1] + secondCorner[1]) / 2];
+    } else if (control.sharedOrientation === 'east-west' && sections.length >= 2) {
+      const firstIsWest = control.positions[0].column < control.positions[1].column;
+      const firstCorner = projectedSectionCorner(sections[0].geometry, firstIsWest, control.northSide);
+      const secondCorner = projectedSectionCorner(sections[1].geometry, !firstIsWest, control.northSide);
+      targetAnchor = [(firstCorner[0] + secondCorner[0]) / 2, (firstCorner[1] + secondCorner[1]) / 2];
+      referenceEastSide = firstIsWest;
+    } else {
+      targetAnchor = projectedSectionCorner(sections[0].geometry, control.eastSide, control.northSide);
+    }
+    const targetNorth = projectedSectionCorner(sections[0].geometry, referenceEastSide, true);
+    const targetSouth = projectedSectionCorner(sections[0].geometry, referenceEastSide, false);
     const targetVector = [
-      endMetres[0] - startMetres[0],
-      endMetres[1] - startMetres[1],
+      targetSouth[0] - targetNorth[0],
+      targetSouth[1] - targetNorth[1],
     ];
-    const sourceLength = Math.hypot(...sourceVector);
     const targetLength = Math.hypot(...targetVector);
-    if (!(sourceLength > 0 && targetLength > 0)) throw new Error('The CAD section scale could not be resolved.');
-    const scale = targetLength / sourceLength;
+    if (!(Math.hypot(...control.sourceSouthVector) > 0 && targetLength > 0)) throw new Error('The CAD section orientation could not be resolved.');
+    const scale = state.detected.planScale * 0.0254 / 72;
     const rotation = Math.atan2(targetVector[1], targetVector[0])
-      - Math.atan2(sourceVector[1], sourceVector[0]);
+      - Math.atan2(control.sourceSouthVector[1], control.sourceSouthVector[0]);
     const cos = Math.cos(rotation);
     const sin = Math.sin(rotation);
 
-    const corners = cad.points.map((point) => {
-      const x = point[0] - control.sourceControls[0][0];
-      const y = -(point[1] - control.sourceControls[0][1]);
+    const transformPoint = (point) => {
+      const x = point[0] - control.sourceAnchor[0];
+      const y = -(point[1] - control.sourceAnchor[1]);
       const metres = [
-        startMetres[0] + scale * (x * cos - y * sin),
-        startMetres[1] + scale * (x * sin + y * cos),
+        targetAnchor[0] + scale * (x * cos - y * sin),
+        targetAnchor[1] + scale * (x * sin + y * cos),
       ];
       const [lon, lat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
       return [lat, lon];
-    });
+    };
+    const rings = (cad.rings?.length ? cad.rings : [cad.points])
+      .map((ring) => ring.map(transformPoint));
+    const corners = rings.length === 1 ? rings[0] : rings.map((ring) => [ring]);
 
     const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
     replaceBoundary(layer);
@@ -953,7 +1027,8 @@ async function buildCadHatchBoundaryFromDetected() {
     const center = layer.getBounds().getCenter();
     $('latInput').value = center.lat.toFixed(7);
     $('lonInput').value = center.lng.toFixed(7);
-    setPdfStatus(`CAD site boundary extracted from layer P-PROPOSED-H and aligned to the ATS section corners for ${legalValue}. Verify the orange boundary before confirming.`);
+    const anchorLabel = anchors.map((anchor) => `${anchor.part || ''} ${anchor.legal}`.trim()).join(' and ');
+    setPdfStatus(`CAD site boundary extracted from layer P-PROPOSED-H at plan scale 1:${state.detected.planScale} and aligned to ${anchorLabel}. Verify the orange boundary before confirming.`);
   } catch (err) {
     console.error('The CAD site boundary could not be positioned.', err);
     setPdfStatus(`The CAD site boundary was found, but it could not be positioned: ${err.message || err}`);
@@ -1037,8 +1112,7 @@ function updateBoundarySummary() {
     return;
   }
   const gj = layer.toGeoJSON();
-  const ring = gj.geometry.type === 'Polygon' ? gj.geometry.coordinates[0] : null;
-  const area = ring ? polygonAreaApprox(ring) : null;
+  const area = geometryAreaApprox(gj.geometry);
   const hectares = area ? area / 10000 : null;
   const center = layer.getBounds().getCenter();
   $('boundarySummary').innerHTML = `<strong>Boundary ready for review.</strong> ${hectares ? `Approx. ${hectares.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ha. ` : ''}Map centre ${center.lat.toFixed(6)}, ${center.lng.toFixed(6)}.`;
@@ -1053,6 +1127,22 @@ function polygonAreaApprox(ring) {
   let area = 0;
   for (let i = 0, j = xy.length - 1; i < xy.length; j = i++) area += xy[j][0] * xy[i][1] - xy[i][0] * xy[j][1];
   return Math.abs(area) / 2;
+}
+
+function geometryAreaApprox(geometry) {
+  if (geometry?.type === 'Polygon') {
+    return geometry.coordinates.reduce((sum, ring, index) => (
+      sum + polygonAreaApprox(ring) * (index === 0 ? 1 : -1)
+    ), 0);
+  }
+  if (geometry?.type === 'MultiPolygon') {
+    return geometry.coordinates.reduce((sum, polygon) => (
+      sum + polygon.reduce((part, ring, index) => (
+        part + polygonAreaApprox(ring) * (index === 0 ? 1 : -1)
+      ), 0)
+    ), 0);
+  }
+  return 0;
 }
 
 function confirmBoundary() {

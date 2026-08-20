@@ -10,6 +10,72 @@ function validLsd(lsd, section, township, range, meridian) {
     && validSection(section, township, range, meridian);
 }
 
+function normalizeSectionPart(value) {
+  const part = String(value || '').replace(/[^NSEW]/gi, '').toUpperCase();
+  return ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW'].includes(part) ? part : null;
+}
+
+function sectionAnchor(partValue, section, township, range, meridian) {
+  const part = normalizeSectionPart(partValue);
+  const sec = Number(section);
+  const twp = Number(township);
+  const rge = Number(range);
+  const mer = Number(meridian);
+  if (!part || !validSection(sec, twp, rge, mer)) return null;
+  return {
+    legal: `SEC-${sec}-${twp}-${rge}-W${mer}M`,
+    sec,
+    twp,
+    rge,
+    mer,
+    part,
+    northSide: part.includes('N') ? true : part.includes('S') ? false : null,
+    eastSide: part.includes('E') ? true : part.includes('W') ? false : null,
+  };
+}
+
+export function detectSectionAnchors(text) {
+  if (!text) return [];
+  const part = String.raw`((?:N|S|E|W)\s*\.?\s*(?:(?:E|W)\s*\.?)?)`;
+  const compact = text.match(
+    /\b(NE|NW|SE|SW|N|S|E|W)\s*(\d{1,2})(?:\s*(?:AND|&)\s*(NE|NW|SE|SW|N|S|E|W)\s*(\d{1,2}))?\s*-\s*(\d{1,3})\s*-\s*(\d{1,2})\s*-\s*W?\s*([456])(?!\d)/i
+  );
+  if (compact) {
+    const first = sectionAnchor(compact[1], compact[2], compact[5], compact[6], compact[7]);
+    const second = compact[3]
+      ? sectionAnchor(compact[3], compact[4], compact[5], compact[6], compact[7])
+      : null;
+    return [first, second].filter(Boolean);
+  }
+
+  const multi = text.match(new RegExp(
+    `\\b${part}\\s*(?:1\\s*\\/\\s*[24]\\s*)?SEC(?:TION)?\\.?\\s*(\\d{1,2})\\s*(?:&|AND)\\s*${part}\\s*(?:1\\s*\\/\\s*[24]\\s*)?SEC(?:TION)?\\.?\\s*(\\d{1,2})\\s*,?\\s*TWP\\.?\\s*(\\d{1,3})\\s*,?\\s*RGE\\.?\\s*(\\d{1,2})\\s*,?\\s*W\\.?\\s*([456])\\s*M\\.?`,
+    'i'
+  ));
+  if (multi) {
+    return [
+      sectionAnchor(multi[1], multi[2], multi[5], multi[6], multi[7]),
+      sectionAnchor(multi[3], multi[4], multi[5], multi[6], multi[7]),
+    ].filter(Boolean);
+  }
+
+  const single = text.match(new RegExp(
+    `\\b${part}\\s*(?:1\\s*\\/\\s*[24]\\s*)?SEC(?:TION)?\\.?\\s*(\\d{1,2})\\s*TWP\\.?\\s*(\\d{1,3})\\s*RGE\\.?\\s*(\\d{1,2})\\s*W\\.?\\s*([456])\\s*M\\.?`,
+    'i'
+  ));
+  if (!single) return [];
+  const anchor = sectionAnchor(single[1], single[2], single[3], single[4], single[5]);
+  return anchor ? [anchor] : [];
+}
+
+export function detectPlanScale(text) {
+  if (!text) return null;
+  const scales = [...text.matchAll(/\bSCALE\s*1\s*:\s*(\d{2,6})\b/gi)]
+    .map((match) => Number(match[1]))
+    .filter((value) => value >= 100 && value <= 100000);
+  return scales.length ? Math.max(...scales) : null;
+}
+
 export function detectLegalLocation(text) {
   if (!text) return null;
 
@@ -60,6 +126,9 @@ export function detectLegalLocation(text) {
     }
   }
 
+  const sectionAnchors = detectSectionAnchors(text);
+  if (sectionAnchors.length) return sectionAnchors[0].legal;
+
   const labelledSection = text.match(
     /\b(?:[NSEW]\s*\.?\s*1\s*\/\s*2\s*)?SEC(?:TION)?\.?\s*(\d{1,2})\s*TWP\.?\s*(\d{1,3})\s*RGE\.?\s*(\d{1,2})\s*W\.?\s*([456])\s*M\.?/i
   );
@@ -68,19 +137,6 @@ export function detectLegalLocation(text) {
     const township = Number(labelledSection[2]);
     const range = Number(labelledSection[3]);
     const meridian = Number(labelledSection[4]);
-    if (validSection(section, township, range, meridian)) {
-      return `SEC-${section}-${township}-${range}-W${meridian}M`;
-    }
-  }
-
-  const compactPartSection = text.match(
-    /\b[NSEW](?:\s*1\s*\/\s*2)?\s*[._-]?\s*(\d{1,2})\s*-\s*(\d{1,3})\s*-\s*(\d{1,2})\s*-\s*W?\s*([456])(?!\d)/i
-  );
-  if (compactPartSection) {
-    const section = Number(compactPartSection[1]);
-    const township = Number(compactPartSection[2]);
-    const range = Number(compactPartSection[3]);
-    const meridian = Number(compactPartSection[4]);
     if (validSection(section, township, range, meridian)) {
       return `SEC-${section}-${township}-${range}-W${meridian}M`;
     }

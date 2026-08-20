@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from '../plan-parser.mjs';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanScale, detectSectionAnchors } from '../plan-parser.mjs';
 
 test('detects the Clear North pad-coded LSD location', () => {
   const text = 'CLEAR NORTH GIFT 5P-18-79-12-5 PAGE 5/7';
@@ -31,6 +31,29 @@ test('detects a labelled half-section location from an as-built plan', () => {
     detectLegalLocation('As Built E12-82-11-5_Rev0 Prelim.pdf'),
     'SEC-12-82-11-W5M'
   );
+});
+
+test('detects quarter-section and half-section anchors from borrow-pit filenames', () => {
+  assert.deepEqual(
+    detectSectionAnchors('As Built NE33-82-13-5_Rev0 Prelim.pdf'),
+    [{ legal: 'SEC-33-82-13-W5M', sec: 33, twp: 82, rge: 13, mer: 5, part: 'NE', northSide: true, eastSide: true }]
+  );
+  assert.deepEqual(
+    detectSectionAnchors('As Built S32-82-12-5_Rev0 Prelim.pdf')[0],
+    { legal: 'SEC-32-82-12-W5M', sec: 32, twp: 82, rge: 12, mer: 5, part: 'S', northSide: false, eastSide: null }
+  );
+});
+
+test('detects two adjoining quarter-section anchors from a borrow-pit filename', () => {
+  const anchors = detectSectionAnchors('As Built NE 28 and SE 33-82-12-5_Rev0 Prelim.pdf');
+  assert.deepEqual(anchors.map((anchor) => [anchor.part, anchor.sec, anchor.legal]), [
+    ['NE', 28, 'SEC-28-82-12-W5M'],
+    ['SE', 33, 'SEC-33-82-12-W5M'],
+  ]);
+});
+
+test('uses the overview scale when a plan also contains larger details', () => {
+  assert.equal(detectPlanScale('SCALE 1:5000 DETAIL SCALE 1:1000'), 5000);
 });
 
 test('rejects out-of-range legal locations', () => {

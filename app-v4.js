@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.21';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.21';
-import { boundaryCandidateArea, candidatePreviewPaths, candidateRings, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.21';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.22';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.22';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.22';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -267,7 +267,15 @@ function candidatePresentation(candidate) {
 }
 
 function prepareBoundaryCandidates(candidates, detected) {
-  const usable = (candidates || []).filter((candidate) => isUsableBoundaryCandidate(candidate, detected));
+  const fingerprints = new Set();
+  const usable = (candidates || [])
+    .filter((candidate) => isUsableBoundaryCandidate(candidate, detected))
+    .filter((candidate) => {
+      const fingerprint = `${candidate.kind}|${candidate.pageNumber || 0}|${candidateFingerprint(candidate)}`;
+      if (fingerprints.has(fingerprint)) return false;
+      fingerprints.add(fingerprint);
+      return true;
+    });
   const prepared = usable.map((candidate, index) => {
     const presentation = candidatePresentation(candidate);
     return {

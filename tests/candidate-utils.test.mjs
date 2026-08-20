@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   boundaryCandidateArea,
+  candidateFingerprint,
   candidatePreviewPaths,
   candidateRings,
   rankBoundaryCandidates,
@@ -26,6 +27,12 @@ test('preserves every multipart ring in a candidate preview', () => {
   };
   assert.equal(candidateRings(candidate).length, 2);
   assert.equal(candidatePreviewPaths(candidate).length, 2);
+});
+
+test('fingerprints duplicate vector candidates consistently', () => {
+  const first = { points: [[1, 2], [3, 2], [3, 4], [1, 4]] };
+  const duplicate = { rings: [[[1, 2], [3, 2], [3, 4], [1, 4]]] };
+  assert.equal(candidateFingerprint(first), candidateFingerprint(duplicate));
 });
 
 test('ranks recommended overview geometry ahead of detail alternatives', () => {

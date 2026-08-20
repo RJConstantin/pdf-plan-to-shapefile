@@ -106,9 +106,98 @@ function traceBoundaryRings(paths) {
   return rings;
 }
 
+function traceBoundarySegments(segments) {
+  const edgeCounts = new Map();
+  const coordinates = new Map();
+  segments.forEach(([a, b]) => {
+    const key = edgeKey(a, b);
+    const entry = edgeCounts.get(key) || { count: 0, a: pointKey(a), b: pointKey(b) };
+    entry.count += 1;
+    edgeCounts.set(key, entry);
+    coordinates.set(pointKey(a), a);
+    coordinates.set(pointKey(b), b);
+  });
+  const edges = [...edgeCounts.values()].filter((edge) => edge.count % 2 === 1);
+  const adjacency = new Map();
+  edges.forEach((edge, index) => {
+    [edge.a, edge.b].forEach((key) => {
+      if (!adjacency.has(key)) adjacency.set(key, []);
+      adjacency.get(key).push(index);
+    });
+  });
+  const unused = new Set(edges.map((_, index) => index));
+  const rings = [];
+  while (unused.size) {
+    const firstEdgeIndex = unused.values().next().value;
+    const start = edges[firstEdgeIndex].a;
+    let current = start;
+    let previous = null;
+    const ring = [];
+    for (let safety = 0; safety <= edges.length + 1; safety += 1) {
+      ring.push(coordinates.get(current));
+      const candidates = (adjacency.get(current) || []).filter((index) => unused.has(index));
+      const edgeIndex = candidates.find((index) => {
+        const edge = edges[index];
+        const other = edge.a === current ? edge.b : edge.a;
+        return other !== previous;
+      }) ?? candidates[0];
+      if (edgeIndex === undefined) break;
+      unused.delete(edgeIndex);
+      const edge = edges[edgeIndex];
+      const next = edge.a === current ? edge.b : edge.a;
+      previous = current;
+      current = next;
+      if (current === start) break;
+    }
+    if (ring.length >= 3 && current === start) rings.push(ring);
+  }
+  return rings;
+}
+
 export function extractHatchRings(paths) {
   const cleaned = paths.map(cleanPath).filter((path) => path.length >= 3);
   return sharedEdgeGroups(cleaned).flatMap(traceBoundaryRings);
+}
+
+function pointOnSegment(point, a, b, tolerance = 0.002) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= tolerance ** 2) return null;
+  const t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / lengthSquared;
+  if (t <= tolerance || t >= 1 - tolerance) return null;
+  const projected = [a[0] + t * dx, a[1] + t * dy];
+  return Math.hypot(point[0] - projected[0], point[1] - projected[1]) <= tolerance
+    ? { point: projected, t }
+    : null;
+}
+
+// Dissolve adjoining survey-area rings into their true outside boundary. Survey
+// plans often split a shared side into different segment lengths, so exact edge
+// cancellation alone leaves internal seams and overlapping-looking polygons.
+export function dissolveRings(paths) {
+  const cleaned = paths.map(cleanPath).filter((path) => path.length >= 3);
+  if (cleaned.length < 2) return cleaned;
+  const vertices = cleaned.flat();
+  const noded = [];
+  cleaned.forEach((path) => {
+    pathEdges(path).forEach(({ a, b }) => {
+      const splits = [{ point: a, t: 0 }, { point: b, t: 1 }];
+      vertices.forEach((point) => {
+        const split = pointOnSegment(point, a, b);
+        if (split) splits.push(split);
+      });
+      splits
+        .sort((first, second) => first.t - second.t)
+        .forEach((split, index, values) => {
+          const next = values[index + 1];
+          if (next && pointKey(split.point) !== pointKey(next.point)) {
+            noded.push([split.point, next.point]);
+          }
+        });
+    });
+  });
+  return traceBoundarySegments(noded);
 }
 
 function polygonArea(points) {

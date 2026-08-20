@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from '../cad-geometry.mjs';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from '../cad-geometry.mjs';
 
 test('reconstructs separate pit and access-road outlines from CAD hatch triangles', () => {
   const paths = [
@@ -51,4 +51,18 @@ test('calibrates an oversized PDF drawing from its printed area', () => {
   const calibration = calibrateRingsByArea(rings, 5000, targetArea);
   assert.equal(calibration.correction, 0.1);
   assert.ok(Math.abs(calibration.hectares - targetArea) < 1e-9);
+});
+
+test('dissolves adjoining plan areas even when a shared side is split differently', () => {
+  const rings = [
+    [[0, 0], [100, 0], [100, 100], [0, 100]],
+    [[0, 100], [50, 100], [100, 100], [100, 120], [0, 120]],
+  ];
+  const dissolved = dissolveRings(rings);
+  assert.equal(dissolved.length, 1);
+  const area = dissolved[0].reduce((sum, point, index) => {
+    const next = dissolved[0][(index + 1) % dissolved[0].length];
+    return sum + point[0] * next[1] - next[0] * point[1];
+  }, 0) / 2;
+  assert.equal(Math.abs(area), 12000);
 });

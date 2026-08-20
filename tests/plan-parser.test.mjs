@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from '../plan-parser.mjs';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from '../plan-parser.mjs';
 
 test('detects the Clear North pad-coded LSD location', () => {
   const text = 'CLEAR NORTH GIFT 5P-18-79-12-5 PAGE 5/7';
@@ -73,6 +73,12 @@ test('detects proposed coordinates from unsigned latitude and signed longitude D
   const result = detectPlanCoordinates(text);
   assert.ok(Math.abs(result.lat - 55.8444167) < 1e-6);
   assert.ok(Math.abs(result.lon + 115.8766111) < 1e-6);
+});
+
+test('identifies an existing approach coordinate as an access-end anchor', () => {
+  const text = `Existing Approach & Culvert (Lat.) 55°52'02.9" NAD
+    (Long.) -115°48'01.3" 83`;
+  assert.equal(detectCoordinateRole(text), 'access-end');
 });
 
 test('detects sketch-plan areas in visual and PDF extraction order', () => {
@@ -153,6 +159,25 @@ test('detects the Clear North closed pad traverse and tie line', () => {
     north += segment.distance * Math.cos(radians);
   }
   assert.ok(Math.hypot(east, north) < 0.01);
+});
+
+test('detects a legacy well-site tie when CAD extraction separates every character', () => {
+  const text = `Well Site Detail Well Casing
+    6 5 2 .5 (T ie ) 2 7 8 \u00b0 5 3 '
+    To Convert Local Astronomic Bearings to UTM Grid: - 1 \u00b0 5 4 ' 2 0 "`;
+  assert.deepEqual(detectLegacyWellSiteTie(text), {
+    anchor: 'section-boundary',
+    distance: 652.5,
+    bearing: 278 + 53 / 60,
+    gridCorrection: -(1 + 54 / 60 + 20 / 3600),
+  });
+});
+
+test('does not treat an ordinary well-site dimension as a surveyed tie', () => {
+  assert.equal(
+    detectLegacyWellSiteTie('Well Site Detail Well Casing 100.00 80.00 8.00 A/R'),
+    null,
+  );
 });
 
 test('detects both endpoint legal locations in a preliminary pipeline filename', () => {

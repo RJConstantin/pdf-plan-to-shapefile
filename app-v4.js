@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.38';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.38';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.38';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.39';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.39';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.39';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -274,7 +274,7 @@ function candidatePresentation(candidate) {
     return {
       title: 'Survey fill boundary',
       confidence: 'High confidence',
-      reason: 'Reconstructs the connected coloured survey areas and checks their combined area against the total printed in the PDF.',
+      reason: 'Dissolves adjoining coloured survey areas into their outside boundary and checks it against the total printed area.',
       recommendationRank: 88,
     };
   }
@@ -427,6 +427,7 @@ function detectPlanInfo(text) {
   }
 
   result.sectionAnchors = detectSectionAnchors(text);
+  result.coordinateRole = detectCoordinateRole(text);
   result.planScale = detectPlanScale(text);
   result.surveyDistances = detectSurveyDistances(text);
   result.planAreas = detectPlanAreas(text);
@@ -553,6 +554,33 @@ function connectedPathGroups(paths) {
     groups.push(group);
   }
   return groups;
+}
+
+function surveyAccessAnchor(rings) {
+  if (!rings?.length) return null;
+  const siteRing = rings.slice().sort((a, b) => polygonArea(b) - polygonArea(a))[0];
+  const siteCenter = polygonCentroid(siteRing);
+  const points = rings.flat();
+  const farthest = points.reduce((best, point) => {
+    const distance = Math.hypot(point[0] - siteCenter[0], point[1] - siteCenter[1]);
+    return !best || distance > best.distance ? { point, distance } : best;
+  }, null);
+  if (!farthest) return null;
+  const direction = [
+    (farthest.point[0] - siteCenter[0]) / farthest.distance,
+    (farthest.point[1] - siteCenter[1]) / farthest.distance,
+  ];
+  const projections = points.map((point) => ({
+    point,
+    value: (point[0] - siteCenter[0]) * direction[0]
+      + (point[1] - siteCenter[1]) * direction[1],
+  }));
+  const maximum = Math.max(...projections.map((item) => item.value));
+  const endpoint = projections.filter((item) => maximum - item.value <= 2).map((item) => item.point);
+  return [
+    endpoint.reduce((sum, point) => sum + point[0], 0) / endpoint.length,
+    endpoint.reduce((sum, point) => sum + point[1], 0) / endpoint.length,
+  ];
 }
 
 function convexHull(points) {
@@ -1009,25 +1037,59 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
           .flatMap((paths) => extractHatchRings(paths))
           .filter((ring) => polygonArea(ring) * metresPerPoint ** 2 >= 5);
         connectedPathGroups(rings.map((points) => ({ points }))).forEach((group) => {
-          const groupedRings = group.map((path) => path.points);
-          const hectares = groupedRings.map((ring) => (
+          let groupedRings = group.map((path) => path.points);
+          let hectares = groupedRings.map((ring) => (
             polygonArea(ring) * metresPerPoint ** 2 / 10000
           ));
-          const total = hectares.reduce((sum, value) => sum + value, 0);
+          let total = hectares.reduce((sum, value) => sum + value, 0);
+          const missingArea = detected.planAreas.total - total;
+          if (missingArea > 0) {
+            const groupBounds = pointBounds(groupedRings.flat());
+            const missingOutline = dloMagentaPaths
+              .filter((path) => path.pageNumber === pageNumber && path.closed && path.points.length >= 3)
+              .map((path) => ({
+                ring: path.points,
+                hectares: polygonArea(path.points) * metresPerPoint ** 2 / 10000,
+                bounds: pointBounds(path.points),
+              }))
+              .filter((outline) => boundsTouch(groupBounds, outline.bounds, 3))
+              .sort((a, b) => (
+                Math.abs(a.hectares - missingArea) - Math.abs(b.hectares - missingArea)
+              ))[0];
+            if (missingOutline && Math.abs(missingOutline.hectares - missingArea) / missingArea <= 0.2) {
+              groupedRings.push(missingOutline.ring);
+              hectares.push(missingOutline.hectares);
+              total += missingOutline.hectares;
+            }
+          }
+          const dissolved = dissolveRings(groupedRings);
+          if (dissolved.length && dissolved.length <= groupedRings.length) {
+            groupedRings = dissolved;
+            hectares = groupedRings.map((ring) => (
+              polygonArea(ring) * metresPerPoint ** 2 / 10000
+            ));
+            total = hectares.reduce((sum, value) => sum + value, 0);
+          }
           const areaError = Math.abs(total - detected.planAreas.total) / detected.planAreas.total;
           if (total < 0.01 || areaError > 0.2) return;
           const siteRing = groupedRings.slice().sort((a, b) => polygonArea(b) - polygonArea(a))[0];
+          const coordinateAccessAnchor = detected.coordinateRole === 'access-end'
+            ? surveyAccessAnchor(groupedRings)
+            : null;
           fillCandidates.push({
             kind: 'generic-site-plan',
             sourceKind: 'survey-fill',
-            anchorKind: Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
-              ? 'coordinate' : detected.legalTie ? 'survey-tie' : 'legal-centre',
+            anchorKind: coordinateAccessAnchor
+              ? 'coordinate-access-end'
+              : Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
+                ? 'coordinate' : detected.legalTie ? 'survey-tie' : 'legal-centre',
             pageNumber,
             pageQuarterTurns: detected.pageQuarterTurns?.[pageNumber] || 0,
             planScale,
             points: groupedRings.flat(),
             rings: groupedRings,
             siteCenter: polygonCentroid(siteRing),
+            sourceAnchor: coordinateAccessAnchor,
             hectares,
             areaError,
             recommendationRank: 88,
@@ -1447,7 +1509,7 @@ function renderDetectedInfo(info, pages) {
     : info.cadBoundary?.kind === 'generic-site-plan' && info.cadBoundary.sourceKind === 'prominent-vector'
     ? `The selected outline is the strongest connected plan vector based on its colour, size, closure, and geometry. It is positioned from ${info.cadBoundary.anchorKind === 'survey-tie' ? 'the surveyed tie to the ATS section boundary' : info.cadBoundary.anchorKind === 'legal-centre' ? 'the centre of the detected legal subdivision as an approximate anchor' : 'the plan coordinate'} and the overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.`
     : info.cadBoundary?.kind === 'generic-site-plan'
-    ? 'The selected outline is extracted from closed PDF vectors, checked against the printed hectare values, and positioned from the plan coordinate and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.'
+    ? `The selected outline is extracted from closed PDF vectors, checked against the printed hectare values, and positioned from ${info.cadBoundary.anchorKind === 'coordinate-access-end' ? 'the surveyed approach and culvert coordinate' : 'the plan coordinate'} and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.`
     : info.cadBoundary?.kind === 'dlo-hatch' && info.cadBoundary.sourceKind === 'overall-view'
     ? 'The DLO corridor is reconstructed from the complete overall-view geometry in the top-right plan panel, preserving the connection across the river. It is positioned from the X1 coordinate in NAD83 UTM Zone 11. Confirm the route against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'dlo-hatch'
@@ -1923,6 +1985,22 @@ async function buildCadHatchBoundaryFromDetected() {
       const secondCorner = projectedSectionCorner(sections[1].geometry, !firstIsWest, control.northSide);
       targetAnchor = [(firstCorner[0] + secondCorner[0]) / 2, (firstCorner[1] + secondCorner[1]) / 2];
       referenceEastSide = firstIsWest;
+    } else if (cad.anchorKind === 'coordinate-access-end' && cad.sourceAnchor) {
+      const targetAnchor = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
+      const metresPerPoint = planScale * 0.0254 / 72;
+      const transformPoint = (point) => {
+        const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
+          point[0] - cad.sourceAnchor[0],
+          point[1] - cad.sourceAnchor[1],
+        ], cad.pageQuarterTurns);
+        const metres = [
+          targetAnchor[0] + drawingX * metresPerPoint,
+          targetAnchor[1] - drawingY * metresPerPoint,
+        ];
+        const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
+        return [pointLat, pointLon];
+      };
+      rings = cad.rings.map((ring) => ring.map(transformPoint));
     } else {
       targetAnchor = projectedSectionCorner(sections[0].geometry, control.eastSide, control.northSide);
     }
@@ -2031,6 +2109,8 @@ async function buildRedSiteBoundaryFromDetected() {
       ? `the ${state.detected.legalTie.distance.toFixed(1)} m survey tie to the ATS section ${surveyTieResult.sectionAnchor}${surveyTieResult.eastingControl ? ` and the drawn N-S quarter line matched to the parcel ${surveyTieResult.eastingControl}` : ''}`
       : cad.anchorKind === 'legal-centre' || cad.anchorKind === 'survey-tie'
         ? `the centre of ${state.detected.legal} as an approximate anchor`
+        : cad.anchorKind === 'coordinate-access-end'
+          ? 'the surveyed existing approach and culvert coordinate'
         : 'the proposed-site centre coordinate';
     setPdfStatus(`${sourceLabel} ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from ${anchorLabel}. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
   } catch (err) {

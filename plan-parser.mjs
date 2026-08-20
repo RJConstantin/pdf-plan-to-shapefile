@@ -167,6 +167,15 @@ export function detectPlanCoordinates(text) {
   return null;
 }
 
+export function detectCoordinateRole(text) {
+  if (!text) return null;
+  const source = String(text).replace(/\s+/g, ' ');
+  if (/\bEXISTING\s+APPROACH\s*(?:&|AND)\s*CULVERT\b[\s\S]{0,260}?\bLAT\.?\b/i.test(source)) {
+    return 'access-end';
+  }
+  return null;
+}
+
 function labelledArea(text, label, valuesBeforeLabels) {
   const number = String.raw`(\d{1,3}(?:[.,]\d{1,4})?)`;
   const acres = String.raw`(?:\s*\([^)]*\bac\.?\s*\))?`;

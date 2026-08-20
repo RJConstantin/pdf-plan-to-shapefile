@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.19';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.19';
-import { boundaryCandidateArea, candidatePreviewPaths, candidateRings, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.19';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.20';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.20';
+import { boundaryCandidateArea, candidatePreviewPaths, candidateRings, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.20';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -327,6 +327,14 @@ function renderBoundaryCandidates() {
 async function selectBoundaryCandidate(candidateId) {
   const candidate = state.boundaryCandidates.find((item) => item.id === candidateId);
   if (!candidate) return;
+  const fieldLat = numberValue('latInput');
+  const fieldLon = numberValue('lonInput');
+  if (validLatLon(fieldLat, fieldLon)) {
+    state.detected.lat = fieldLat;
+    state.detected.lon = fieldLon;
+  }
+  const fieldLegal = $('legalInput').value.trim();
+  if (fieldLegal) state.detected.legal = fieldLegal;
   state.selectedBoundaryCandidateId = candidate.id;
   state.detected.cadBoundary = candidate;
   state.confirmed = false;
@@ -1182,11 +1190,12 @@ function dmsToDecimal(d, m, s, west) {
 }
 
 function applyDetectedFields(info) {
-  if (info.legal) $('legalInput').value = info.legal;
-  if (Number.isFinite(info.lat)) $('latInput').value = info.lat.toFixed(7);
-  if (Number.isFinite(info.lon)) $('lonInput').value = info.lon.toFixed(7);
-  if (Number.isFinite(info.width)) $('widthInput').value = String(info.width);
-  if (Number.isFinite(info.height)) $('heightInput').value = String(info.height);
+  $('legalInput').value = info.legal || '';
+  $('latInput').value = Number.isFinite(info.lat) ? info.lat.toFixed(7) : '';
+  $('lonInput').value = Number.isFinite(info.lon) ? info.lon.toFixed(7) : '';
+  $('widthInput').value = Number.isFinite(info.width) ? String(info.width) : '';
+  $('heightInput').value = Number.isFinite(info.height) ? String(info.height) : '';
+  $('rotationInput').value = '0';
 }
 
 function renderDetectedInfo(info, pages) {

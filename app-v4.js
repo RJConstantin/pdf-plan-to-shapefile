@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.31';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.31';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.31';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.32';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.32';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.32';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -139,11 +139,14 @@ async function handlePdf(file) {
     state.pdf = doc;
     let text = '';
     const pageQuarterTurns = {};
+    const pageScales = {};
 
     for (let i = 1; i <= doc.numPages; i += 1) {
       const page = await doc.getPage(i);
       const tc = await page.getTextContent();
-      text += ' ' + tc.items.map((item) => item.str).join(' ');
+      const pageText = tc.items.map((item) => item.str).join(' ');
+      text += ' ' + pageText;
+      pageScales[i] = detectPlanScale(pageText);
       pageQuarterTurns[i] = inferPageRotationQuarterTurns(
         tc.items,
         page.getViewport({ scale: 1 }).transform,
@@ -154,6 +157,7 @@ async function handlePdf(file) {
     state.pdfText = text.replace(/\s+/g, ' ').trim();
     state.detected = detectPlanInfo(`${file.name} ${state.pdfText}`);
     state.detected.pageQuarterTurns = pageQuarterTurns;
+    state.detected.pageScales = pageScales;
     const extractedCandidates = await extractCadProposedBoundaries(doc, state.detected);
     state.boundaryCandidates = prepareBoundaryCandidates(extractedCandidates, state.detected);
     applyDetectedFields(state.detected);
@@ -264,6 +268,14 @@ function candidatePresentation(candidate) {
       confidence: 'High confidence',
       reason: 'Uses closed plan vectors whose areas match the hectare values printed in the PDF.',
       recommendationRank: 90,
+    };
+  }
+  if (candidate.kind === 'generic-site-plan' && candidate.sourceKind === 'survey-fill') {
+    return {
+      title: 'Survey fill boundary',
+      confidence: 'High confidence',
+      reason: 'Reconstructs the connected coloured survey areas and checks their combined area against the total printed in the PDF.',
+      recommendationRank: 88,
     };
   }
   if (candidate.kind === 'generic-site-plan' && candidate.sourceKind === 'prominent-vector') {
@@ -691,6 +703,7 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
     const sectionSegments = [];
     const redPaths = [];
     const closedVectorPaths = [];
+    const surveyFillPaths = [];
     const dloYellowPaths = [];
     const dloRedPaths = [];
     const dloMagentaPaths = [];
@@ -733,24 +746,31 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
       const markedContent = [];
       let matrix = [1, 0, 0, 1, 0, 0];
       let strokeColor = null;
+      let fillColor = null;
 
       for (let index = 0; index < operatorList.fnArray.length; index += 1) {
         const name = names[operatorList.fnArray[index]];
         const args = operatorList.argsArray[index];
-        if (name === 'save') graphicsStack.push({ matrix: matrix.slice(), strokeColor });
+        if (name === 'save') graphicsStack.push({ matrix: matrix.slice(), strokeColor, fillColor });
         else if (name === 'restore') {
           const restored = graphicsStack.pop();
           if (restored) {
             matrix = restored.matrix;
             strokeColor = restored.strokeColor;
+            fillColor = restored.fillColor;
           }
         }
         else if (name === 'transform') matrix = multiplyMatrix(matrix, args);
         else if (name === 'setStrokeRGBColor') {
           strokeColor = typeof args?.[0] === 'string' ? args[0] : Array.from(args || []);
         }
+        else if (name === 'setFillRGBColor') {
+          fillColor = typeof args?.[0] === 'string' ? args[0] : Array.from(args || []);
+        }
         else if (name === 'setStrokeGray') strokeColor = [args?.[0], args?.[0], args?.[0]];
+        else if (name === 'setFillGray') fillColor = [args?.[0], args?.[0], args?.[0]];
         else if (name === 'setStrokeCMYKColor' || name === 'setStrokeColor' || name === 'setStrokeColorN') strokeColor = null;
+        else if (name === 'setFillCMYKColor' || name === 'setFillColor' || name === 'setFillColorN') fillColor = null;
         else if (name === 'beginMarkedContentProps') {
           markedContent.push(args?.[1]?.id || markedContent.at(-1) || null);
         } else if (name === 'beginMarkedContent') {
@@ -759,10 +779,16 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
           markedContent.pop();
         } else if (name === 'constructPath') {
           const details = parseConstructedSubpathDetails(args, matrix);
-          const screenDetails = (detected.dloPlan || collectClosedVectors) ? details.map(({ points, closed }) => ({
+          const surveyAreaFill = isSurveyAreaFillColor(fillColor);
+          const screenDetails = (detected.dloPlan || collectClosedVectors || surveyAreaFill) ? details.map(({ points, closed }) => ({
             closed,
             points: points.map((point) => viewport.convertToViewportPoint(point[0], point[1])),
           })) : [];
+          if (surveyAreaFill) screenDetails.forEach(({ points, closed }) => {
+            if (closed && points.length >= 3 && polygonArea(points) > 5) {
+              surveyFillPaths.push({ pageNumber, fillColor: String(fillColor), points });
+            }
+          });
           if (collectClosedVectors) screenDetails.forEach(({ points, closed }) => {
             if (closed && points.length >= 3 && polygonArea(points) > 5 && closedVectorPaths.length < 12000) {
               closedVectorPaths.push({
@@ -939,6 +965,51 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
           pageQuarterTurns: detected.pageQuarterTurns?.[genericMatch.pageNumber] || 0,
         });
       }
+    }
+
+    if (!boundaryCandidates.length && !detected.dloPlan
+      && Number.isFinite(detected.planAreas?.total) && surveyFillPaths.length) {
+      const fillCandidates = [];
+      const pages = [...new Set(surveyFillPaths.map((path) => path.pageNumber))];
+      pages.forEach((pageNumber) => {
+        const planScale = detected.pageScales?.[pageNumber] || detected.planScale;
+        if (!(Number.isFinite(planScale) && planScale > 0)) return;
+        const colourGroups = new Map();
+        surveyFillPaths.filter((path) => path.pageNumber === pageNumber).forEach((path) => {
+          if (!colourGroups.has(path.fillColor)) colourGroups.set(path.fillColor, []);
+          colourGroups.get(path.fillColor).push(path.points);
+        });
+        const metresPerPoint = planScale * 0.0254 / 72;
+        const rings = [...colourGroups.values()]
+          .flatMap((paths) => extractHatchRings(paths))
+          .filter((ring) => polygonArea(ring) * metresPerPoint ** 2 >= 5);
+        connectedPathGroups(rings.map((points) => ({ points }))).forEach((group) => {
+          const groupedRings = group.map((path) => path.points);
+          const hectares = groupedRings.map((ring) => (
+            polygonArea(ring) * metresPerPoint ** 2 / 10000
+          ));
+          const total = hectares.reduce((sum, value) => sum + value, 0);
+          const areaError = Math.abs(total - detected.planAreas.total) / detected.planAreas.total;
+          if (total < 0.01 || areaError > 0.2) return;
+          const siteRing = groupedRings.slice().sort((a, b) => polygonArea(b) - polygonArea(a))[0];
+          fillCandidates.push({
+            kind: 'generic-site-plan',
+            sourceKind: 'survey-fill',
+            anchorKind: Number.isFinite(detected.lat) && Number.isFinite(detected.lon) ? 'coordinate' : 'legal-centre',
+            pageNumber,
+            pageQuarterTurns: detected.pageQuarterTurns?.[pageNumber] || 0,
+            planScale,
+            points: groupedRings.flat(),
+            rings: groupedRings,
+            siteCenter: polygonCentroid(siteRing),
+            hectares,
+            areaError,
+            recommendationRank: 88,
+          });
+        });
+      });
+      fillCandidates.sort((a, b) => a.areaError - b.areaError || b.planScale - a.planScale);
+      if (fillCandidates.length) boundaryCandidates.push(fillCandidates[0]);
     }
 
     if (!boundaryCandidates.length && !detected.dloPlan && !detected.traverse) {
@@ -1316,7 +1387,9 @@ function renderDetectedInfo(info, pages) {
   if (info.cadBoundary?.kind === 'site-hatch') found.push('<strong>CAD site boundary:</strong> proposed/as-built hatch boundary and section grid found');
   if (info.cadBoundary?.kind === 'red-site-plan') found.push(`<strong>Sketch boundary:</strong> ${info.cadBoundary.rings.length} area-matched red vector parts found`);
   if (info.cadBoundary?.kind === 'generic-site-plan') {
-    const method = info.cadBoundary.sourceKind === 'prominent-vector' ? 'prominent closed vector' : 'area-matched vector';
+    const method = info.cadBoundary.sourceKind === 'survey-fill'
+      ? 'reconstructed survey fill'
+      : info.cadBoundary.sourceKind === 'prominent-vector' ? 'prominent closed vector' : 'area-matched vector';
     found.push(`<strong>Plan boundary:</strong> ${info.cadBoundary.rings.length} ${method} part${info.cadBoundary.rings.length === 1 ? '' : 's'} found`);
   }
   if (info.cadBoundary?.kind === 'dlo-hatch') {
@@ -1695,7 +1768,7 @@ async function buildRedSiteBoundaryFromDetected() {
   const cad = state.detected.cadBoundary;
   const lat = state.detected.lat;
   const lon = state.detected.lon;
-  const planScale = state.detected.planScale;
+  const planScale = cad?.planScale || state.detected.planScale;
   if (!cad?.siteCenter || !cad.rings?.length || !Number.isFinite(lat)
     || !Number.isFinite(lon) || !Number.isFinite(planScale)) return;
 
@@ -1723,6 +1796,7 @@ async function buildRedSiteBoundaryFromDetected() {
     const partsLabel = rings.length === 1 ? 'site boundary' : `site and access boundaries (${rings.length} parts)`;
     const sourceLabel = cad.sourceKind === 'prominent-vector'
       ? 'Prominent plan vector'
+      : cad.sourceKind === 'survey-fill' ? 'Survey fill vector'
       : cad.kind === 'generic-site-plan' ? 'Area-matched vector' : 'Closed red vector';
     const anchorLabel = cad.anchorKind === 'legal-centre'
       ? `the centre of ${state.detected.legal} as an approximate anchor`

@@ -5,7 +5,7 @@ function finitePoint(point) {
     && Number.isFinite(point[1]);
 }
 
-export function isPlanRedColor(value) {
+function normalizedRgbColor(value) {
   let components = null;
   if (typeof value === 'string') {
     const match = value.trim().match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
@@ -17,9 +17,22 @@ export function isPlanRedColor(value) {
       components = raw.map((component) => component / divisor);
     }
   }
+  return components;
+}
+
+export function isPlanRedColor(value) {
+  const components = normalizedRgbColor(value);
   if (!components) return false;
   const [red, green, blue] = components;
   return red >= 0.7 && green <= 0.3 && blue <= 0.3;
+}
+
+export function isSurveyAreaFillColor(value) {
+  const components = normalizedRgbColor(value);
+  if (!components) return false;
+  const [red, green, blue] = components;
+  return red >= 0.85 && green >= 0.72 && blue >= 0.25
+    && Math.max(...components) - Math.min(...components) >= 0.08;
 }
 
 export function inferPageRotationQuarterTurns(textItems, viewportTransform) {

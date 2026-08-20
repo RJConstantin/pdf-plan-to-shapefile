@@ -10,6 +10,7 @@ import {
   inferPageRotationQuarterTurns,
   inferPlanScaleFromVectorDimensions,
   isPlanRedColor,
+  isSurveyAreaFillColor,
   rankBoundaryCandidates,
   rotateScreenOffsetQuarterTurns,
 } from '../candidate-utils.mjs';
@@ -116,4 +117,11 @@ test('accepts the orange-red CAD stroke used by survey plans', () => {
   assert.equal(isPlanRedColor('#ff0000'), true);
   assert.equal(isPlanRedColor([255, 46, 23]), true);
   assert.equal(isPlanRedColor('#6b7f91'), false);
+});
+
+test('recognizes yellow and beige survey-area fills without accepting white', () => {
+  assert.equal(isSurveyAreaFillColor('#ffecb3'), true);
+  assert.equal(isSurveyAreaFillColor('#ffff7f'), true);
+  assert.equal(isSurveyAreaFillColor('#ffffff'), false);
+  assert.equal(isSurveyAreaFillColor('#6b7f91'), false);
 });

@@ -76,6 +76,19 @@ export function detectPlanScale(text) {
   return scales.length ? Math.max(...scales) : null;
 }
 
+export function detectSurveyDistances(text) {
+  if (!text) return [];
+  const source = String(text).replace(/\s+/g, ' ');
+  const values = [];
+  for (const match of source.matchAll(/\b(\d{2,3}(?:[.,]\d{1,2})?)\b/g)) {
+    const suffix = source.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 20);
+    if (/^\s*[°º'’"”]/.test(suffix)) continue;
+    const value = Number(match[1].replace(',', '.'));
+    if (value >= 20 && value <= 500) values.push(value);
+  }
+  return [...new Set(values)];
+}
+
 export function detectPlanCoordinates(text) {
   if (!text) return null;
   const source = String(text).replace(/\s+/g, ' ');
@@ -265,7 +278,12 @@ export function detectExplicitDimensions(text) {
   if (dimensionPair) {
     const width = Number(dimensionPair[1].replace(',', '.'));
     const height = Number(dimensionPair[2].replace(',', '.'));
-    if (width >= 20 && width <= 500 && height >= 20 && height <= 500) {
+    const followingText = text.slice(
+      (dimensionPair.index || 0) + dimensionPair[0].length,
+      (dimensionPair.index || 0) + dimensionPair[0].length + 60,
+    );
+    if (!/^\s*CORNER\s+CUT\b/i.test(followingText)
+      && width >= 20 && width <= 500 && height >= 20 && height <= 500) {
       return { width, height };
     }
   }

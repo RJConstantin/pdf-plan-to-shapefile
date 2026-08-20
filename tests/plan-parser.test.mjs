@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from '../plan-parser.mjs';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from '../plan-parser.mjs';
 
 test('detects the Clear North pad-coded LSD location', () => {
   const text = 'CLEAR NORTH GIFT 5P-18-79-12-5 PAGE 5/7';
@@ -115,6 +115,17 @@ test('detects an explicit dimension pair', () => {
     width: 150,
     height: 200,
   });
+});
+
+test('does not use a labelled corner cut as the site dimensions', () => {
+  assert.equal(detectExplicitDimensions('8.00 A/R 20.0x20.0 Corner Cut Well Site Detail'), null);
+});
+
+test('collects surveyed distances while excluding bearing values', () => {
+  assert.deepEqual(
+    detectSurveyDistances("100.00 89°59'00'' 80.00 359°59'00'' 42.60 179°59'00''"),
+    [100, 80, 42.6],
+  );
 });
 
 test('detects labelled width and length values', () => {

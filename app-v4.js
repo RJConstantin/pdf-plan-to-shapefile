@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.26';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.26';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.26';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.27';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.27';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.27';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -138,16 +138,22 @@ async function handlePdf(file) {
     const doc = await pdfjsLib.getDocument({ data }).promise;
     state.pdf = doc;
     let text = '';
+    const pageQuarterTurns = {};
 
     for (let i = 1; i <= doc.numPages; i += 1) {
       const page = await doc.getPage(i);
       const tc = await page.getTextContent();
       text += ' ' + tc.items.map((item) => item.str).join(' ');
+      pageQuarterTurns[i] = inferPageRotationQuarterTurns(
+        tc.items,
+        page.getViewport({ scale: 1 }).transform,
+      );
       if (i === 1) await renderPage(page);
     }
 
     state.pdfText = text.replace(/\s+/g, ' ').trim();
     state.detected = detectPlanInfo(`${file.name} ${state.pdfText}`);
+    state.detected.pageQuarterTurns = pageQuarterTurns;
     const extractedCandidates = await extractCadProposedBoundaries(doc, state.detected);
     state.boundaryCandidates = prepareBoundaryCandidates(extractedCandidates, state.detected);
     applyDetectedFields(state.detected);
@@ -209,8 +215,8 @@ function isUsableBoundaryCandidate(candidate, detected) {
   if (candidate.kind === 'corridor') return detected.legalLocations?.length >= 2;
   if (candidate.kind === 'site-hatch') return detected.legal?.startsWith('SEC-');
   if (candidate.kind === 'red-site-plan' || candidate.kind === 'generic-site-plan') {
-    return Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
-      && Number.isFinite(detected.planScale);
+    return Number.isFinite(detected.planScale)
+      && ((Number.isFinite(detected.lat) && Number.isFinite(detected.lon)) || Boolean(detected.legal));
   }
   if (candidate.kind === 'dlo-hatch') {
     return Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
@@ -404,6 +410,7 @@ function detectPlanInfo(text) {
 
   result.sectionAnchors = detectSectionAnchors(text);
   result.planScale = detectPlanScale(text);
+  result.surveyDistances = detectSurveyDistances(text);
   result.planAreas = detectPlanAreas(text);
   result.dloPlan = detectDloPlan(text);
   const legal = result.sectionAnchors[0]?.legal || detectLegalLocation(text);
@@ -794,6 +801,8 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
                 redPaths.push({
                   pageNumber,
                   closed,
+                  red: true,
+                  distinctive: true,
                   points: points.map((point) => viewport.convertToViewportPoint(point[0], point[1])),
                 });
               }
@@ -889,6 +898,18 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
       });
     }
 
+    if (!Number.isFinite(detected.planScale) && detected.legal && redPaths.length) {
+      const inferredScale = inferPlanScaleFromVectorDimensions(
+        redPaths,
+        pageSizes,
+        detected.surveyDistances,
+      );
+      if (inferredScale) {
+        detected.planScale = inferredScale.scale;
+        detected.planScaleInferred = true;
+      }
+    }
+
     const redMatch = matchClosedPathsByArea(redPaths, detected.planScale, detected.planAreas);
     if (redMatch) {
       boundaryCandidates.push({
@@ -898,6 +919,7 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
         rings: redMatch.rings,
         siteCenter: polygonCentroid(redMatch.siteRing),
         hectares: redMatch.hectares,
+        pageQuarterTurns: detected.pageQuarterTurns?.[redMatch.pageNumber] || 0,
       });
     }
 
@@ -916,21 +938,33 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
           rings: genericMatch.rings,
           siteCenter: polygonCentroid(genericMatch.siteRing),
           hectares: genericMatch.hectares,
+          pageQuarterTurns: detected.pageQuarterTurns?.[genericMatch.pageNumber] || 0,
         });
       }
     }
 
     if (!boundaryCandidates.length && !detected.dloPlan) {
-      findProminentVectorCandidates(closedVectorPaths, pageSizes, detected.planScale)
-        .forEach((match, index) => {
+      const prominentPaths = closedVectorPaths.length ? closedVectorPaths : redPaths;
+      const prominentMatches = findProminentVectorCandidates(prominentPaths, pageSizes, detected.planScale);
+      const groups = connectedPathGroups(prominentMatches.map((match) => ({
+        points: match.ring,
+        match,
+      }))).sort((a, b) => (
+        Math.max(...b.map((path) => path.match.score)) - Math.max(...a.map((path) => path.match.score))
+      ));
+      groups.forEach((group, index) => {
+          const rings = group.map((path) => path.points);
+          const siteRing = rings.slice().sort((a, b) => polygonArea(b) - polygonArea(a))[0];
           boundaryCandidates.push({
             kind: 'generic-site-plan',
             sourceKind: 'prominent-vector',
-            pageNumber: match.pageNumber,
-            points: match.ring,
-            rings: [match.ring],
-            siteCenter: polygonCentroid(match.ring),
-            hectares: [match.hectares],
+            anchorKind: Number.isFinite(detected.lat) && Number.isFinite(detected.lon) ? 'coordinate' : 'legal-centre',
+            pageNumber: group[0].match.pageNumber,
+            points: rings.flat(),
+            rings,
+            siteCenter: polygonCentroid(siteRing),
+            hectares: group.map((path) => path.match.hectares),
+            pageQuarterTurns: detected.pageQuarterTurns?.[group[0].match.pageNumber] || 0,
             recommendationRank: 72 - index,
           });
         });
@@ -1266,7 +1300,10 @@ function renderDetectedInfo(info, pages) {
   if (info.legal) found.push(`<strong>Legal location:</strong> ${escapeHtml(info.legal)}`);
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) found.push(`<strong>Coordinate:</strong> ${info.lat.toFixed(6)}, ${info.lon.toFixed(6)}`);
   if (Number.isFinite(info.width) && Number.isFinite(info.height)) found.push(`<strong>Likely dimensions:</strong> ${info.width} m × ${info.height} m`);
-  if (Number.isFinite(info.planScale)) found.push(`<strong>Overview scale:</strong> 1:${info.planScale.toLocaleString()}`);
+  if (Number.isFinite(info.planScale)) {
+    const scaleSource = info.planScaleInferred ? ' (inferred from surveyed dimensions)' : '';
+    found.push(`<strong>Overview scale:</strong> 1:${info.planScale.toLocaleString()}${scaleSource}`);
+  }
   if (Number.isFinite(info.planAreas?.total)) found.push(`<strong>Printed total area:</strong> ${info.planAreas.total.toFixed(3)} ha`);
   if (info.dloPlan) found.push(`<strong>DLO trail:</strong> ${info.dloPlan.width} m access road, ${info.dloPlan.lengthKm} km stated length, ${info.dloPlan.area.toFixed(3)} ha disposition area`);
   if (info.sectionAnchors?.length > 1) {
@@ -1299,7 +1336,7 @@ function renderDetectedInfo(info, pages) {
     : info.cadBoundary?.kind === 'red-site-plan'
     ? 'The site and access boundaries are extracted from closed red PDF vectors, checked against the printed hectare values, and positioned from the proposed-site centre coordinate and overview scale. Confirm them against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'generic-site-plan' && info.cadBoundary.sourceKind === 'prominent-vector'
-    ? 'The selected outline is the strongest closed plan vector based on its colour, size, closure, and geometry. It is positioned from the plan coordinate and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.'
+    ? `The selected outline is the strongest connected plan vector based on its colour, size, closure, and geometry. It is positioned from the ${info.cadBoundary.anchorKind === 'legal-centre' ? 'centre of the detected legal subdivision as an approximate anchor' : 'plan coordinate'} and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.`
     : info.cadBoundary?.kind === 'generic-site-plan'
     ? 'The selected outline is extracted from closed PDF vectors, checked against the printed hectare values, and positioned from the plan coordinate and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.'
     : info.cadBoundary?.kind === 'dlo-hatch' && info.cadBoundary.sourceKind === 'overall-view'
@@ -1319,6 +1356,7 @@ function confidenceLabel(info) {
   if (info.cadBoundary?.kind === 'site-hatch' && info.legal) return 'CAD site boundary and ATS section control found';
   if (info.cadBoundary?.kind === 'red-site-plan') return 'Area-matched sketch vectors and site centre found';
   if (info.cadBoundary?.kind === 'generic-site-plan') {
+    if (info.cadBoundary.anchorKind === 'legal-centre') return 'Plan vectors and approximate legal anchor found';
     return info.cadBoundary.sourceKind === 'prominent-vector'
       ? 'Prominent plan vector and coordinate found'
       : 'Area-matched plan vectors and coordinate found';
@@ -1663,9 +1701,13 @@ async function buildRedSiteBoundaryFromDetected() {
     const targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
     const metresPerPoint = planScale * 0.0254 / 72;
     const transformPoint = (point) => {
+      const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
+        point[0] - cad.siteCenter[0],
+        point[1] - cad.siteCenter[1],
+      ], cad.pageQuarterTurns);
       const metres = [
-        targetCenter[0] + (point[0] - cad.siteCenter[0]) * metresPerPoint,
-        targetCenter[1] - (point[1] - cad.siteCenter[1]) * metresPerPoint,
+        targetCenter[0] + drawingX * metresPerPoint,
+        targetCenter[1] - drawingY * metresPerPoint,
       ];
       const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
       return [pointLat, pointLon];
@@ -1680,7 +1722,10 @@ async function buildRedSiteBoundaryFromDetected() {
     const sourceLabel = cad.sourceKind === 'prominent-vector'
       ? 'Prominent plan vector'
       : cad.kind === 'generic-site-plan' ? 'Area-matched vector' : 'Closed red vector';
-    setPdfStatus(`${sourceLabel} ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from the proposed-site centre coordinate. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
+    const anchorLabel = cad.anchorKind === 'legal-centre'
+      ? `the centre of ${state.detected.legal} as an approximate anchor`
+      : 'the proposed-site centre coordinate';
+    setPdfStatus(`${sourceLabel} ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from ${anchorLabel}. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
   } catch (err) {
     console.error('The red sketch boundary could not be positioned.', err);
     setPdfStatus(`The red sketch boundary was found, but it could not be positioned: ${err.message || err}`);

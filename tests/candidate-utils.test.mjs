@@ -7,7 +7,10 @@ import {
   candidatePreviewPaths,
   candidateRings,
   findProminentVectorCandidates,
+  inferPageRotationQuarterTurns,
+  inferPlanScaleFromVectorDimensions,
   rankBoundaryCandidates,
+  rotateScreenOffsetQuarterTurns,
 } from '../candidate-utils.mjs';
 
 test('normalizes a candidate to a bounded SVG preview', () => {
@@ -71,4 +74,38 @@ test('accepts a nearly closed vector and removes its duplicated endpoint', () =>
   }], { 1: { width: 1000, height: 1000 } }, 1000);
   assert.equal(matches.length, 1);
   assert.equal(matches[0].ring.length, 4);
+});
+
+test('infers a common plan scale from a surveyed pad and its dimensions', () => {
+  const inference = inferPlanScaleFromVectorDimensions([{
+    pageNumber: 1,
+    closed: true,
+    points: [[137.4, 570.36], [250.8, 570.36], [250.8, 712.2], [137.4, 712.2]],
+  }], new Map([[1, { width: 612, height: 1008 }]]), [100, 80, 42.6, 170.62]);
+  assert.equal(inference.scale, 2000);
+  assert.equal(inference.horizontalMetres, 80);
+  assert.equal(inference.verticalMetres, 100);
+});
+
+test('detects a CAD sheet whose readable content needs a clockwise quarter turn', () => {
+  const textItems = [
+    { str: 'SURVEY PLAN AND TITLE BLOCK WITH WELL SITE DETAILS AND CERTIFICATION', transform: [0, 10, -10, 0, 0, 0] },
+    { str: 'BEARINGS DISTANCES ACCESS ROAD AND PLAN NOTES', transform: [0, 10, -10, 0, 0, 0] },
+    { str: 'minor note', transform: [10, 0, 0, 10, 0, 0] },
+  ];
+  assert.equal(inferPageRotationQuarterTurns(textItems, [1, 0, 0, -1, 0, 1008]), 1);
+});
+
+test('leaves an upright CAD sheet unrotated', () => {
+  const textItems = [
+    { str: 'SURVEY PLAN AND TITLE BLOCK WITH WELL SITE DETAILS AND CERTIFICATION', transform: [10, 0, 0, 10, 0, 0] },
+    { str: 'BEARINGS DISTANCES ACCESS ROAD AND PLAN NOTES', transform: [10, 0, 0, 10, 0, 0] },
+  ];
+  assert.equal(inferPageRotationQuarterTurns(textItems, [1, 0, 0, -1, 0, 1008]), 0);
+});
+
+test('rotates screen offsets clockwise around their anchor', () => {
+  assert.deepEqual(rotateScreenOffsetQuarterTurns([10, 20], 1), [-20, 10]);
+  assert.deepEqual(rotateScreenOffsetQuarterTurns([10, 20], 2), [-10, -20]);
+  assert.deepEqual(rotateScreenOffsetQuarterTurns([10, 20], 3), [20, -10]);
 });

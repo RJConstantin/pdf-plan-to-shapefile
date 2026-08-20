@@ -5,6 +5,41 @@ function finitePoint(point) {
     && Number.isFinite(point[1]);
 }
 
+export function inferPageRotationQuarterTurns(textItems, viewportTransform) {
+  if (!Array.isArray(textItems) || !Array.isArray(viewportTransform)
+    || viewportTransform.length < 4) return 0;
+
+  const weights = [0, 0, 0, 0];
+  for (const item of textItems) {
+    const transform = item?.transform;
+    const text = String(item?.str || '').trim();
+    if (!transform || transform.length < 4 || !text) continue;
+    const a = viewportTransform[0] * transform[0] + viewportTransform[2] * transform[1];
+    const b = viewportTransform[1] * transform[0] + viewportTransform[3] * transform[1];
+    const angle = Math.atan2(b, a);
+    const quarter = Math.round(angle / (Math.PI / 2));
+    const residual = Math.abs(angle - quarter * Math.PI / 2);
+    if (residual > 25 * Math.PI / 180) continue;
+    const normalized = ((quarter % 4) + 4) % 4;
+    weights[normalized] += Math.min(text.length, 80);
+  }
+
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const dominantWeight = Math.max(...weights);
+  const screenQuarterTurns = weights.indexOf(dominantWeight);
+  if (total < 80 || dominantWeight / total < 0.65) return 0;
+  return (4 - screenQuarterTurns) % 4;
+}
+
+export function rotateScreenOffsetQuarterTurns(offset, quarterTurns = 0) {
+  const [x, y] = offset;
+  const normalized = ((Math.round(quarterTurns) % 4) + 4) % 4;
+  if (normalized === 1) return [-y, x];
+  if (normalized === 2) return [-x, -y];
+  if (normalized === 3) return [y, -x];
+  return [x, y];
+}
+
 export function candidateRings(candidate) {
   const rings = candidate?.rings?.length ? candidate.rings : [candidate?.points || []];
   return rings
@@ -23,7 +58,10 @@ export function candidateFingerprint(candidate) {
 }
 
 export function candidatePreviewPaths(candidate, width = 260, height = 132, padding = 9) {
-  const rings = candidateRings(candidate);
+  const quarterTurns = candidate?.pageQuarterTurns || 0;
+  const rings = candidateRings(candidate).map((ring) => (
+    ring.map((point) => rotateScreenOffsetQuarterTurns(point, quarterTurns))
+  ));
   const points = rings.flat();
   if (!points.length) return [];
   let minX = Infinity;
@@ -140,4 +178,49 @@ export function findProminentVectorCandidates(paths, pageSizes, planScale, limit
   return ranked
     .filter((candidate) => candidate.score >= topScore - 12)
     .slice(0, limit);
+}
+
+export function inferPlanScaleFromVectorDimensions(paths, pageSizes, distances) {
+  const commonScales = [500, 1000, 2000, 2500, 5000, 10000, 20000];
+  const dimensionValues = (distances || []).filter((value) => Number.isFinite(value) && value >= 20 && value <= 500);
+  if (!dimensionValues.length) return null;
+  const matches = [];
+
+  for (const path of paths || []) {
+    const ring = effectivelyClosedRing(path);
+    const pageSize = pageSizes instanceof Map ? pageSizes.get(path.pageNumber) : pageSizes?.[path.pageNumber];
+    if (!ring || !pageSize?.width || !pageSize?.height) continue;
+    const xs = ring.map((point) => point[0]);
+    const ys = ring.map((point) => point[1]);
+    const width = Math.max(...xs) - Math.min(...xs);
+    const height = Math.max(...ys) - Math.min(...ys);
+    const coverage = width * height / (pageSize.width * pageSize.height);
+    if (width < 10 || height < 10 || coverage < 0.0005 || coverage > 0.15) continue;
+
+    for (const horizontalMetres of dimensionValues) {
+      for (const verticalMetres of dimensionValues) {
+        const horizontalScale = horizontalMetres * 72 / (width * 0.0254);
+        const verticalScale = verticalMetres * 72 / (height * 0.0254);
+        const agreementError = Math.abs(horizontalScale - verticalScale)
+          / ((horizontalScale + verticalScale) / 2);
+        if (agreementError > 0.035) continue;
+        const averageScale = (horizontalScale + verticalScale) / 2;
+        const scale = commonScales.reduce((closest, candidate) => (
+          Math.abs(candidate - averageScale) < Math.abs(closest - averageScale) ? candidate : closest
+        ));
+        const commonScaleError = Math.abs(scale - averageScale) / scale;
+        if (commonScaleError > 0.06) continue;
+        matches.push({
+          scale,
+          horizontalMetres,
+          verticalMetres,
+          agreementError,
+          commonScaleError,
+          score: 100 - agreementError * 800 - commonScaleError * 400 + Math.log10(coverage * 1e6),
+        });
+      }
+    }
+  }
+
+  return matches.sort((a, b) => b.score - a.score)[0] || null;
 }

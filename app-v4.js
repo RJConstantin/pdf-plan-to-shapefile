@@ -1,6 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.18';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.18';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.19';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.19';
+import { boundaryCandidateArea, candidatePreviewPaths, candidateRings, rankBoundaryCandidates } from './candidate-utils.mjs?v=2026.08.20.19';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -24,6 +25,8 @@ const state = {
   dispositionRequestId: 0,
   confirmed: false,
   detected: {},
+  boundaryCandidates: [],
+  selectedBoundaryCandidateId: null,
   locatedFeature: null,
   currentFile: null,
 };
@@ -118,6 +121,9 @@ async function handlePdf(file) {
   state.currentFile = file;
   state.confirmed = false;
   state.locatedFeature = null;
+  state.boundaryCandidates = [];
+  state.selectedBoundaryCandidateId = null;
+  hideBoundaryCandidates();
   if (state.drawn) {
     state.drawn.clearLayers();
     state.candidate = null;
@@ -142,39 +148,28 @@ async function handlePdf(file) {
 
     state.pdfText = text.replace(/\s+/g, ' ').trim();
     state.detected = detectPlanInfo(`${file.name} ${state.pdfText}`);
-    const cadBoundary = await extractCadProposedBoundary(doc, state.detected);
-    if (cadBoundary?.kind === 'corridor' && state.detected.legalLocations?.length >= 2) {
-      state.detected.cadBoundary = cadBoundary;
-    } else if (cadBoundary?.kind === 'site-hatch' && state.detected.legal?.startsWith('SEC-')) {
-      state.detected.cadBoundary = cadBoundary;
-    } else if (cadBoundary?.kind === 'red-site-plan'
-      && Number.isFinite(state.detected.lat) && Number.isFinite(state.detected.lon)) {
-      state.detected.cadBoundary = cadBoundary;
-    } else if (cadBoundary?.kind === 'dlo-hatch'
-      && Number.isFinite(state.detected.lat) && Number.isFinite(state.detected.lon)) {
-      state.detected.cadBoundary = cadBoundary;
-    }
+    const extractedCandidates = await extractCadProposedBoundaries(doc, state.detected);
+    state.boundaryCandidates = prepareBoundaryCandidates(extractedCandidates, state.detected);
     applyDetectedFields(state.detected);
     renderDetectedInfo(state.detected, doc.numPages);
-    setPdfStatus(state.pdfText.length > 40
-      ? `Loaded ${doc.numPages} page${doc.numPages === 1 ? '' : 's'} with extractable plan text.`
-      : `Loaded ${doc.numPages} page${doc.numPages === 1 ? '' : 's'}. Little or no extractable text was found. Enter the legal location and plan dimensions, then position the boundary on the map.`);
-    $('pdfConfidence').textContent = confidenceLabel(state.detected);
+    renderBoundaryCandidates();
+    if (state.boundaryCandidates.length) {
+      const count = state.boundaryCandidates.length;
+      setPdfStatus(`Found ${count} boundary candidate${count === 1 ? '' : 's'}. Review the shape preview and choose one before mapping.`);
+      $('pdfConfidence').textContent = `${count} boundary candidate${count === 1 ? '' : 's'} ready for review`;
+    } else {
+      setPdfStatus(state.pdfText.length > 40
+        ? `Loaded ${doc.numPages} page${doc.numPages === 1 ? '' : 's'} with extractable plan text, but no reliable vector boundary was identified. Use the plan fields or map drawing tools.`
+        : `Loaded ${doc.numPages} page${doc.numPages === 1 ? '' : 's'}. Little or no extractable text was found. Enter the legal location and plan dimensions, then position the boundary on the map.`);
+      $('pdfConfidence').textContent = confidenceLabel(state.detected);
+    }
 
     const located = await locateFromFields();
-    if (state.detected.cadBoundary?.kind === 'corridor') {
-      await buildCadBoundaryFromDetected();
-    } else if (state.detected.cadBoundary?.kind === 'site-hatch') {
-      await buildCadHatchBoundaryFromDetected();
-    } else if (state.detected.cadBoundary?.kind === 'red-site-plan') {
-      await buildRedSiteBoundaryFromDetected();
-    } else if (state.detected.cadBoundary?.kind === 'dlo-hatch') {
-      await buildDloBoundaryFromDetected();
-    } else if (state.detected.traverse) {
+    if (!state.boundaryCandidates.length && state.detected.traverse) {
       await buildTraverseFromDetected(located);
-    } else if (numberValue('widthInput') && numberValue('heightInput')) {
+    } else if (!state.boundaryCandidates.length && numberValue('widthInput') && numberValue('heightInput')) {
       buildRectangleFromFields();
-    } else if (located && state.detected.legal
+    } else if (!state.boundaryCandidates.length && located && state.detected.legal
       && !Number.isFinite(state.detected.lat) && !Number.isFinite(state.detected.lon)) {
       setPdfStatus('Section found, but this PDF page has no coordinate anchor or explicit pad dimensions. The map is centred on the section for reference only. Draw the boundary on the map or enter known coordinates and dimensions.');
     }
@@ -196,6 +191,159 @@ async function renderPage(page) {
   canvas.height = Math.round(viewport.height);
   await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
   wrap.classList.remove('hidden');
+}
+
+function hideBoundaryCandidates() {
+  $('candidateReview')?.classList.add('hidden');
+  if ($('candidateGrid')) $('candidateGrid').innerHTML = '';
+  if ($('candidateCount')) $('candidateCount').textContent = '';
+}
+
+function isUsableBoundaryCandidate(candidate, detected) {
+  if (!candidate || !candidateRings(candidate).length) return false;
+  if (candidate.kind === 'corridor') return detected.legalLocations?.length >= 2;
+  if (candidate.kind === 'site-hatch') return detected.legal?.startsWith('SEC-');
+  if (candidate.kind === 'red-site-plan' || candidate.kind === 'generic-site-plan') {
+    return Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
+      && Number.isFinite(detected.planScale);
+  }
+  if (candidate.kind === 'dlo-hatch') {
+    return Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
+      && Number.isFinite(candidate.metresPerPoint);
+  }
+  return false;
+}
+
+function candidatePresentation(candidate) {
+  if (candidate.kind === 'dlo-hatch' && candidate.sourceKind === 'overall-view') {
+    return {
+      title: 'Complete overall view',
+      confidence: 'High confidence',
+      reason: 'Uses the complete overview corridor, the printed disposition area, and the X1 coordinate anchor.',
+      recommendationRank: 100,
+    };
+  }
+  if (candidate.kind === 'dlo-hatch') {
+    return {
+      title: 'Detailed plan geometry',
+      confidence: 'Alternative',
+      reason: 'Uses the detailed plan panels and calibrates their combined area to the printed disposition area.',
+      recommendationRank: 65,
+    };
+  }
+  if (candidate.kind === 'corridor') {
+    return {
+      title: 'Proposed CAD corridor',
+      confidence: 'High confidence',
+      reason: 'Uses the named proposed layer and aligns it with two Alberta Township System controls.',
+      recommendationRank: 95,
+    };
+  }
+  if (candidate.kind === 'site-hatch') {
+    return {
+      title: 'Proposed hatch boundary',
+      confidence: 'High confidence',
+      reason: 'Uses the proposed hatch layer and the section-grid control drawn in the PDF.',
+      recommendationRank: 95,
+    };
+  }
+  if (candidate.kind === 'red-site-plan') {
+    return {
+      title: 'Area-matched plan boundary',
+      confidence: 'High confidence',
+      reason: 'Uses closed plan vectors whose areas match the hectare values printed in the PDF.',
+      recommendationRank: 90,
+    };
+  }
+  return {
+    title: 'Area-matched vector outline',
+    confidence: 'Review carefully',
+    reason: 'Uses vector geometry matched to the printed area. Confirm its anchor and alignment against the plan.',
+    recommendationRank: 55,
+  };
+}
+
+function prepareBoundaryCandidates(candidates, detected) {
+  const usable = (candidates || []).filter((candidate) => isUsableBoundaryCandidate(candidate, detected));
+  const prepared = usable.map((candidate, index) => {
+    const presentation = candidatePresentation(candidate);
+    return {
+      ...candidate,
+      ...presentation,
+      recommendationRank: candidate.recommendationRank ?? presentation.recommendationRank,
+      id: `boundary-${candidate.kind}-${candidate.sourceKind || 'primary'}-${candidate.pageNumber || 0}-${index + 1}`,
+    };
+  });
+  const titleTotals = prepared.reduce((counts, candidate) => {
+    counts.set(candidate.title, (counts.get(candidate.title) || 0) + 1);
+    return counts;
+  }, new Map());
+  const titleIndexes = new Map();
+  prepared.forEach((candidate) => {
+    if (titleTotals.get(candidate.title) <= 1) return;
+    const option = (titleIndexes.get(candidate.title) || 0) + 1;
+    titleIndexes.set(candidate.title, option);
+    candidate.title = `${candidate.title} · Option ${option}`;
+  });
+  return rankBoundaryCandidates(prepared);
+}
+
+function renderBoundaryCandidates() {
+  const review = $('candidateReview');
+  const grid = $('candidateGrid');
+  const count = state.boundaryCandidates.length;
+  if (!review || !grid || !count) {
+    hideBoundaryCandidates();
+    return;
+  }
+  review.classList.remove('hidden');
+  $('candidateCount').textContent = `${count} candidate${count === 1 ? '' : 's'}`;
+  grid.innerHTML = state.boundaryCandidates.map((candidate, index) => {
+    const selected = candidate.id === state.selectedBoundaryCandidateId;
+    const recommended = index === 0 && count > 1;
+    const rings = candidateRings(candidate);
+    const paths = candidatePreviewPaths(candidate)
+      .map((path) => `<path d="${path}"></path>`)
+      .join('');
+    const area = boundaryCandidateArea(candidate);
+    const areaLabel = Number.isFinite(area) ? `<span>${area.toFixed(3)} ha</span>` : '';
+    return `<article class="candidate-card${recommended ? ' recommended' : ''}${selected ? ' selected' : ''}" data-candidate-id="${escapeHtml(candidate.id)}">
+      <div class="candidate-preview">
+        <svg viewBox="0 0 260 132" role="img" aria-label="Normalized preview of ${escapeHtml(candidate.title)}">${paths}</svg>
+      </div>
+      <div class="candidate-card-body">
+        <div class="candidate-card-top">
+          <h3>${escapeHtml(candidate.title)}</h3>
+          <span class="candidate-badge">${recommended ? 'Recommended' : escapeHtml(candidate.confidence)}</span>
+        </div>
+        <div class="candidate-meta"><span>Page ${candidate.pageNumber || '?'}</span><span>${rings.length} part${rings.length === 1 ? '' : 's'}</span>${areaLabel}</div>
+        <p class="candidate-reason">${escapeHtml(candidate.reason)}</p>
+        <button type="button" class="candidate-select" data-candidate-id="${escapeHtml(candidate.id)}" aria-pressed="${selected}">${selected ? 'Selected' : 'Use this boundary'}</button>
+      </div>
+    </article>`;
+  }).join('');
+}
+
+async function selectBoundaryCandidate(candidateId) {
+  const candidate = state.boundaryCandidates.find((item) => item.id === candidateId);
+  if (!candidate) return;
+  state.selectedBoundaryCandidateId = candidate.id;
+  state.detected.cadBoundary = candidate;
+  state.confirmed = false;
+  if (state.drawn) {
+    state.drawn.clearLayers();
+    state.candidate = null;
+    updateBoundarySummary();
+  }
+  renderBoundaryCandidates();
+  renderDetectedInfo(state.detected, state.pdf?.numPages || 1);
+  $('pdfConfidence').textContent = confidenceLabel(state.detected);
+  setPdfStatus(`Positioning “${candidate.title}” on the map…`);
+  await locateFromFields();
+  if (candidate.kind === 'corridor') await buildCadBoundaryFromDetected();
+  else if (candidate.kind === 'site-hatch') await buildCadHatchBoundaryFromDetected();
+  else if (candidate.kind === 'red-site-plan' || candidate.kind === 'generic-site-plan') await buildRedSiteBoundaryFromDetected();
+  else if (candidate.kind === 'dlo-hatch') await buildDloBoundaryFromDetected();
 }
 
 function detectPlanInfo(text) {
@@ -478,7 +626,7 @@ function polygonCentroid(points) {
   return [xSum / (3 * crossSum), ySum / (3 * crossSum)];
 }
 
-async function extractCadProposedBoundary(doc, detected = {}) {
+async function extractCadProposedBoundaries(doc, detected = {}) {
   try {
     const config = await doc.getOptionalContentConfig();
     const order = (config.getOrder?.() || []).flat(Infinity).filter((id) => typeof id === 'string');
@@ -489,11 +637,16 @@ async function extractCadProposedBoundary(doc, detected = {}) {
     const hatchPaths = [];
     const sectionSegments = [];
     const redPaths = [];
+    const closedVectorPaths = [];
     const dloYellowPaths = [];
     const dloRedPaths = [];
     const dloMagentaPaths = [];
     const dloCoordinateLabels = [];
     const pageSizes = new Map();
+    const boundaryCandidates = [];
+    const collectClosedVectors = !detected.dloPlan
+      && Number.isFinite(detected.planScale)
+      && Number.isFinite(detected.planAreas?.site);
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
       const page = await doc.getPage(pageNumber);
       const operatorList = await page.getOperatorList();
@@ -552,10 +705,15 @@ async function extractCadProposedBoundary(doc, detected = {}) {
           markedContent.pop();
         } else if (name === 'constructPath') {
           const details = parseConstructedSubpathDetails(args, matrix);
-          const screenDetails = detected.dloPlan ? details.map(({ points, closed }) => ({
+          const screenDetails = (detected.dloPlan || collectClosedVectors) ? details.map(({ points, closed }) => ({
             closed,
             points: points.map((point) => viewport.convertToViewportPoint(point[0], point[1])),
-          })) : null;
+          })) : [];
+          if (collectClosedVectors) screenDetails.forEach(({ points, closed }) => {
+            if (closed && points.length >= 3 && polygonArea(points) > 5 && closedVectorPaths.length < 12000) {
+              closedVectorPaths.push({ pageNumber, closed, points });
+            }
+          });
           const activeLayer = markedContent.at(-1);
           if (proposedLayerId && activeLayer === proposedLayerId) {
             const points = details.flatMap((path) => path.points);
@@ -634,53 +792,77 @@ async function extractCadProposedBoundary(doc, detected = {}) {
         });
       }
       hatchCandidates.sort((a, b) => Number(b.withinSectionDrawing) - Number(a.withinSectionDrawing) || a.area - b.area);
-      const hatch = hatchCandidates[0];
-      if (hatch?.withinSectionDrawing) {
-        return {
-          kind: 'site-hatch',
-          pageNumber: hatch.pageNumber,
-          points: hatch.rings.flat(),
-          rings: hatch.rings,
-          sectionSegments: hatch.screenSegments,
-        };
-      }
+      hatchCandidates
+        .filter((hatch) => hatch.withinSectionDrawing)
+        .slice(0, 4)
+        .forEach((hatch, index) => {
+          boundaryCandidates.push({
+            kind: 'site-hatch',
+            pageNumber: hatch.pageNumber,
+            points: hatch.rings.flat(),
+            rings: hatch.rings,
+            sectionSegments: hatch.screenSegments,
+            recommendationRank: 95 - index,
+          });
+        });
     }
 
     if (candidates.length) {
       candidates.sort((a, b) => b.span - a.span || b.points.length - a.points.length);
-      const candidate = candidates[0];
-      const viewport = candidate.page.getViewport({ scale: 1 });
-      const screenPoints = candidate.points.map((point) => viewport.convertToViewportPoint(point[0], point[1]));
-      const screenSegments = sectionSegments
-        .filter((segment) => segment.pageNumber === candidate.pageNumber)
-        .map((segment) => segment.points.map((point) => viewport.convertToViewportPoint(point[0], point[1])));
-      let [first, second] = principalEndpoints(screenPoints);
-      const horizontal = Math.abs(first[0] - second[0]) >= Math.abs(first[1] - second[1]);
-      const firstComesFirst = horizontal
-        ? first[0] <= second[0]
-        : first[1] <= second[1];
-      if (!firstComesFirst) [first, second] = [second, first];
+      candidates.slice(0, 4).forEach((candidate, index) => {
+        const viewport = candidate.page.getViewport({ scale: 1 });
+        const screenPoints = candidate.points.map((point) => viewport.convertToViewportPoint(point[0], point[1]));
+        const screenSegments = sectionSegments
+          .filter((segment) => segment.pageNumber === candidate.pageNumber)
+          .map((segment) => segment.points.map((point) => viewport.convertToViewportPoint(point[0], point[1])));
+        let [first, second] = principalEndpoints(screenPoints);
+        const horizontal = Math.abs(first[0] - second[0]) >= Math.abs(first[1] - second[1]);
+        const firstComesFirst = horizontal
+          ? first[0] <= second[0]
+          : first[1] <= second[1];
+        if (!firstComesFirst) [first, second] = [second, first];
 
-      return {
-        kind: 'corridor',
-        pageNumber: candidate.pageNumber,
-        points: screenPoints,
-        startPoint: first,
-        endPoint: second,
-        sectionSegments: screenSegments,
-      };
+        boundaryCandidates.push({
+          kind: 'corridor',
+          pageNumber: candidate.pageNumber,
+          points: screenPoints,
+          startPoint: first,
+          endPoint: second,
+          sectionSegments: screenSegments,
+          recommendationRank: 95 - index,
+        });
+      });
     }
 
     const redMatch = matchClosedPathsByArea(redPaths, detected.planScale, detected.planAreas);
     if (redMatch) {
-      return {
+      boundaryCandidates.push({
         kind: 'red-site-plan',
         pageNumber: redMatch.pageNumber,
         points: redMatch.rings.flat(),
         rings: redMatch.rings,
         siteCenter: polygonCentroid(redMatch.siteRing),
         hectares: redMatch.hectares,
-      };
+      });
+    }
+
+    if (!boundaryCandidates.length && !detected.dloPlan) {
+      const genericMatch = matchClosedPathsByArea(
+        closedVectorPaths,
+        detected.planScale,
+        detected.planAreas,
+        0.05,
+      );
+      if (genericMatch) {
+        boundaryCandidates.push({
+          kind: 'generic-site-plan',
+          pageNumber: genericMatch.pageNumber,
+          points: genericMatch.rings.flat(),
+          rings: genericMatch.rings,
+          siteCenter: polygonCentroid(genericMatch.siteRing),
+          hectares: genericMatch.hectares,
+        });
+      }
     }
 
     if (detected.dloPlan && dloYellowPaths.length && dloCoordinateLabels.length) {
@@ -750,7 +932,7 @@ async function extractCadProposedBoundary(doc, detected = {}) {
       overviewCandidates.sort((a, b) => a.areaError - b.areaError || b.rings.length - a.rings.length);
       if (overviewCandidates.length) {
         const overview = overviewCandidates[0];
-        return {
+        boundaryCandidates.push({
           kind: 'dlo-hatch',
           sourceKind: 'overall-view',
           pageNumber: overview.pageNumber,
@@ -760,7 +942,7 @@ async function extractCadProposedBoundary(doc, detected = {}) {
           metresPerPoint: overview.metresPerPoint,
           scaleCorrection: overview.scaleCorrection,
           hectares: overview.hectares,
-        };
+        });
       }
 
       const coordinateLabel = dloCoordinateLabels.slice().sort((a, b) => a.point[0] - b.point[0])[0];
@@ -810,8 +992,9 @@ async function extractCadProposedBoundary(doc, detected = {}) {
             const significantRings = rings.filter((ring) => (
               polygonArea(ring) * calibration.metresPerPoint ** 2 >= 0.2
             ));
-            return {
+            boundaryCandidates.push({
               kind: 'dlo-hatch',
+              sourceKind: 'detailed-plan',
               pageNumber,
               points: significantRings.flat(),
               rings: significantRings,
@@ -819,15 +1002,15 @@ async function extractCadProposedBoundary(doc, detected = {}) {
               metresPerPoint: calibration.metresPerPoint,
               scaleCorrection: calibration.correction,
               hectares: calibration.hectares,
-            };
+            });
           }
         }
       }
     }
-    return null;
+    return boundaryCandidates;
   } catch (err) {
     console.warn('A proposed CAD layer could not be extracted.', err);
-    return null;
+    return [];
   }
 }
 
@@ -1021,6 +1204,7 @@ function renderDetectedInfo(info, pages) {
   if (info.cadBoundary?.kind === 'corridor') found.push(`<strong>Proposed CAD boundary:</strong> vector layer found between ${escapeHtml(info.legalLocations[0])} and ${escapeHtml(info.legalLocations[1])}`);
   if (info.cadBoundary?.kind === 'site-hatch') found.push('<strong>CAD site boundary:</strong> proposed/as-built hatch boundary and section grid found');
   if (info.cadBoundary?.kind === 'red-site-plan') found.push(`<strong>Sketch boundary:</strong> ${info.cadBoundary.rings.length} area-matched red vector parts found`);
+  if (info.cadBoundary?.kind === 'generic-site-plan') found.push(`<strong>Plan boundary:</strong> ${info.cadBoundary.rings.length} area-matched vector parts found`);
   if (info.cadBoundary?.kind === 'dlo-hatch') {
     const source = info.cadBoundary.sourceKind === 'overall-view' ? ' from the complete overall view' : '';
     found.push(`<strong>DLO vector boundary:</strong> ${info.cadBoundary.rings.length} yellow corridor parts${source} found and area-calibrated`);
@@ -1039,6 +1223,8 @@ function renderDetectedInfo(info, pages) {
     ? 'The site boundary is extracted from the PDF CAD hatch and aligned from its section lines to Alberta Township System section corners. Confirm the boundary against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'red-site-plan'
     ? 'The site and access boundaries are extracted from closed red PDF vectors, checked against the printed hectare values, and positioned from the proposed-site centre coordinate and overview scale. Confirm them against the plan and imagery before download.'
+    : info.cadBoundary?.kind === 'generic-site-plan'
+    ? 'The selected outline is extracted from closed PDF vectors, checked against the printed hectare values, and positioned from the plan coordinate and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.'
     : info.cadBoundary?.kind === 'dlo-hatch' && info.cadBoundary.sourceKind === 'overall-view'
     ? 'The DLO corridor is reconstructed from the complete overall-view geometry in the top-right plan panel, preserving the connection across the river. It is positioned from the X1 coordinate in NAD83 UTM Zone 11. Confirm the route against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'dlo-hatch'
@@ -1055,6 +1241,7 @@ function confidenceLabel(info) {
   if (info.cadBoundary?.kind === 'corridor' && info.legalLocations?.length >= 2) return 'Proposed CAD corridor and two legal anchors found';
   if (info.cadBoundary?.kind === 'site-hatch' && info.legal) return 'CAD site boundary and ATS section control found';
   if (info.cadBoundary?.kind === 'red-site-plan') return 'Area-matched sketch vectors and site centre found';
+  if (info.cadBoundary?.kind === 'generic-site-plan') return 'Area-matched plan vectors and coordinate found';
   if (info.cadBoundary?.kind === 'dlo-hatch') return 'DLO corridor vectors, area control, and X1 anchor found';
   if (info.traverse && info.legal) return 'Survey traverse and legal tie found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon) && info.legal) return 'Good spatial anchors found';
@@ -1409,7 +1596,8 @@ async function buildRedSiteBoundaryFromDetected() {
     state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 17 });
     const extractedArea = (cad.hectares || []).reduce((sum, value) => sum + value, 0);
     const partsLabel = rings.length === 1 ? 'site boundary' : `site and access boundaries (${rings.length} parts)`;
-    setPdfStatus(`Closed red vector ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from the proposed-site centre coordinate. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
+    const sourceLabel = cad.kind === 'generic-site-plan' ? 'Area-matched vector' : 'Closed red vector';
+    setPdfStatus(`${sourceLabel} ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from the proposed-site centre coordinate. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
   } catch (err) {
     console.error('The red sketch boundary could not be positioned.', err);
     setPdfStatus(`The red sketch boundary was found, but it could not be positioned: ${err.message || err}`);
@@ -1806,6 +1994,10 @@ function wireEvents() {
     drop.classList.remove('dragging');
   }));
   drop.addEventListener('drop', (e) => handlePdf(e.dataTransfer.files?.[0]));
+  $('candidateGrid')?.addEventListener('click', (event) => {
+    const button = event.target.closest('.candidate-select');
+    if (button) selectBoundaryCandidate(button.dataset.candidateId);
+  });
 
   $('locatePlan').addEventListener('click', locateFromFields);
   $('applyRectangle').addEventListener('click', buildRectangleFromFields);

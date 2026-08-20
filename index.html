@@ -7,11 +7,11 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>PDF Plan to Shapefile</title>
-  <link rel="stylesheet" href="./style.css?v=2026.08.20.18">
-  <script src="./onestop-jsonp-fix.js?v=2026.08.20.18" defer></script>
-  <script type="module" src="./app-v4.js?v=2026.08.20.18"></script>
-  <script type="module" src="./flattened-plan.js?v=2026.08.20.18"></script>
-  <script type="module" src="./coordinate-formats.js?v=2026.08.20.18"></script>
+  <link rel="stylesheet" href="./style.css?v=2026.08.20.19">
+  <script src="./onestop-jsonp-fix.js?v=2026.08.20.19" defer></script>
+  <script type="module" src="./app-v4.js?v=2026.08.20.19"></script>
+  <script type="module" src="./flattened-plan.js?v=2026.08.20.19"></script>
+  <script type="module" src="./coordinate-formats.js?v=2026.08.20.19"></script>
 </head>
 <body>
   <header class="topbar">
@@ -97,10 +97,22 @@
       </section>
     </div>
 
+    <section class="card candidate-review hidden" id="candidateReview" aria-live="polite">
+      <div class="candidate-review-head">
+        <div>
+          <div class="step-label">03 &nbsp; Review detected outlines</div>
+          <h2>Choose the plan shape to map.</h2>
+          <p>The previews are normalized so long corridors and compact sites are both easy to compare. Check the page, shape, parts, and area before selecting one.</p>
+        </div>
+        <div class="candidate-count" id="candidateCount"></div>
+      </div>
+      <div class="candidate-grid" id="candidateGrid"></div>
+    </section>
+
     <section class="card map-card">
       <div class="map-head">
         <div>
-          <div class="step-label">03 &nbsp; Confirm boundary on map</div>
+          <div class="step-label">04 &nbsp; Confirm boundary on map</div>
           <h2>Verify the actual location and shape.</h2>
           <p>Use satellite or street imagery, the ATS grid, active dispositions, and the map editing tools. You can redraw the polygon or move individual vertices. Any edit clears the confirmation.</p>
         </div>
@@ -119,7 +131,7 @@
 
     <section class="card download-card">
       <div>
-        <div class="step-label">04 &nbsp; Download</div>
+        <div class="step-label">05 &nbsp; Download</div>
         <h2 id="downloadTitle">Confirm the boundary to enable download.</h2>
         <p>The downloaded ZIP contains a polygon shapefile for the confirmed boundary in NAD 1983 10TM AEP Forest. Review the output before using it in a regulatory workflow.</p>
       </div>
@@ -128,6 +140,6 @@
   </main>
 
   <footer class="site-disclaimer"><strong>Disclaimer:</strong> These browser based GIS tools are intended for preliminary screening, data preparation and general reference. Results depend on the accuracy, completeness, availability and currency of the source data and services. Verify outputs against the applicable authoritative source before using them for regulatory submissions, surveying, field decisions or other professional work.</footer>
-  <div class="site-version" aria-label="Site version">v2026.08.20.18</div>
+  <div class="site-version" aria-label="Site version">v2026.08.20.19</div>
 </body>
 </html>

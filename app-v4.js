@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.14';
-import { extractHatchRings } from './cad-geometry.mjs?v=2026.08.20.14';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.15';
+import { extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.15';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -139,10 +139,13 @@ async function handlePdf(file) {
 
     state.pdfText = text.replace(/\s+/g, ' ').trim();
     state.detected = detectPlanInfo(`${file.name} ${state.pdfText}`);
-    const cadBoundary = await extractCadProposedBoundary(doc);
+    const cadBoundary = await extractCadProposedBoundary(doc, state.detected);
     if (cadBoundary?.kind === 'corridor' && state.detected.legalLocations?.length >= 2) {
       state.detected.cadBoundary = cadBoundary;
     } else if (cadBoundary?.kind === 'site-hatch' && state.detected.legal?.startsWith('SEC-')) {
+      state.detected.cadBoundary = cadBoundary;
+    } else if (cadBoundary?.kind === 'red-site-plan'
+      && Number.isFinite(state.detected.lat) && Number.isFinite(state.detected.lon)) {
       state.detected.cadBoundary = cadBoundary;
     }
     applyDetectedFields(state.detected);
@@ -157,6 +160,8 @@ async function handlePdf(file) {
       await buildCadBoundaryFromDetected();
     } else if (state.detected.cadBoundary?.kind === 'site-hatch') {
       await buildCadHatchBoundaryFromDetected();
+    } else if (state.detected.cadBoundary?.kind === 'red-site-plan') {
+      await buildRedSiteBoundaryFromDetected();
     } else if (state.detected.traverse) {
       await buildTraverseFromDetected(located);
     } else if (numberValue('widthInput') && numberValue('heightInput')) {
@@ -204,8 +209,17 @@ function detectPlanInfo(text) {
     }
   }
 
+  if (result.lat == null || result.lon == null) {
+    const coordinates = detectPlanCoordinates(text);
+    if (coordinates) {
+      result.lat = coordinates.lat;
+      result.lon = coordinates.lon;
+    }
+  }
+
   result.sectionAnchors = detectSectionAnchors(text);
   result.planScale = detectPlanScale(text);
+  result.planAreas = detectPlanAreas(text);
   const legal = result.sectionAnchors[0]?.legal || detectLegalLocation(text);
   if (legal) result.legal = legal;
   result.legalLocations = detectLegalLocations(text);
@@ -241,7 +255,7 @@ function matrixPoint(matrix, point) {
   ];
 }
 
-function parseConstructedSubpaths(args, matrix) {
+function parseConstructedSubpathDetails(args, matrix) {
   let pathData = args?.[1];
   if (Array.isArray(pathData) && pathData.length === 1) [pathData] = pathData;
   const values = pathData && typeof pathData.length === 'number'
@@ -249,16 +263,20 @@ function parseConstructedSubpaths(args, matrix) {
     : Object.values(pathData || {});
   const paths = [];
   let points = [];
-  const finishPath = () => {
+  const finishPath = (explicitlyClosed = false) => {
     const cleaned = points.filter((point, index) => (
       index === 0 || Math.hypot(point[0] - points[index - 1][0], point[1] - points[index - 1][1]) > 1e-6
     ));
+    let closed = explicitlyClosed;
     if (cleaned.length > 2) {
       const first = cleaned[0];
       const last = cleaned.at(-1);
-      if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6) cleaned.pop();
+      if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6) {
+        closed = true;
+        cleaned.pop();
+      }
     }
-    if (cleaned.length) paths.push(cleaned);
+    if (cleaned.length) paths.push({ points: cleaned, closed });
     points = [];
   };
   for (let i = 0; i < values.length;) {
@@ -277,7 +295,7 @@ function parseConstructedSubpaths(args, matrix) {
       points.push(matrixPoint(matrix, [Number(values[i + 2]), Number(values[i + 3])]));
       i += 4;
     } else if (command === 4) {
-      finishPath();
+      finishPath(true);
       continue;
     } else {
       break;
@@ -285,6 +303,10 @@ function parseConstructedSubpaths(args, matrix) {
   }
   if (points.length) finishPath();
   return paths;
+}
+
+function parseConstructedSubpaths(args, matrix) {
+  return parseConstructedSubpathDetails(args, matrix).map((path) => path.points);
 }
 
 function parseConstructedPath(args, matrix) {
@@ -376,59 +398,116 @@ function principalEndpoints(points) {
   ];
 }
 
-async function extractCadProposedBoundary(doc) {
+function isRedStrokeColor(value) {
+  if (typeof value === 'string') return /^#ff0000$/i.test(value.trim());
+  const values = Array.isArray(value) || ArrayBuffer.isView(value) ? Array.from(value) : [];
+  if (values.length < 3 || !values.slice(0, 3).every(Number.isFinite)) return false;
+  const divisor = Math.max(...values.slice(0, 3)) > 1 ? 255 : 1;
+  const [red, green, blue] = values.slice(0, 3).map((component) => component / divisor);
+  return red >= 0.7 && green <= 0.3 && blue <= 0.3;
+}
+
+function polygonCentroid(points) {
+  let crossSum = 0;
+  let xSum = 0;
+  let ySum = 0;
+  points.forEach((point, index) => {
+    const next = points[(index + 1) % points.length];
+    const cross = point[0] * next[1] - next[0] * point[1];
+    crossSum += cross;
+    xSum += (point[0] + next[0]) * cross;
+    ySum += (point[1] + next[1]) * cross;
+  });
+  if (Math.abs(crossSum) < 1e-9) {
+    return [
+      points.reduce((sum, point) => sum + point[0], 0) / points.length,
+      points.reduce((sum, point) => sum + point[1], 0) / points.length,
+    ];
+  }
+  return [xSum / (3 * crossSum), ySum / (3 * crossSum)];
+}
+
+async function extractCadProposedBoundary(doc, detected = {}) {
   try {
     const config = await doc.getOptionalContentConfig();
     const order = (config.getOrder?.() || []).flat(Infinity).filter((id) => typeof id === 'string');
     const proposedLayerId = order.find((id) => /^P-PROPOSED$/i.test(config.getGroup(id)?.name || ''));
     const proposedHatchLayerId = order.find((id) => /^P-PROPOSED-H$/i.test(config.getGroup(id)?.name || ''));
     const sectionLayerId = order.find((id) => /^L-USEC$/i.test(config.getGroup(id)?.name || ''));
-    if (!proposedLayerId && !proposedHatchLayerId) return null;
-
     const candidates = [];
     const hatchPaths = [];
     const sectionSegments = [];
+    const redPaths = [];
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
       const page = await doc.getPage(pageNumber);
       const operatorList = await page.getOperatorList();
+      const viewport = page.getViewport({ scale: 1 });
       const names = Object.fromEntries(Object.entries(pdfjsLib.OPS).map(([name, code]) => [code, name]));
       const graphicsStack = [];
       const markedContent = [];
       let matrix = [1, 0, 0, 1, 0, 0];
+      let strokeColor = null;
 
       for (let index = 0; index < operatorList.fnArray.length; index += 1) {
         const name = names[operatorList.fnArray[index]];
         const args = operatorList.argsArray[index];
-        if (name === 'save') graphicsStack.push(matrix.slice());
-        else if (name === 'restore') matrix = graphicsStack.pop() || matrix;
+        if (name === 'save') graphicsStack.push({ matrix: matrix.slice(), strokeColor });
+        else if (name === 'restore') {
+          const restored = graphicsStack.pop();
+          if (restored) {
+            matrix = restored.matrix;
+            strokeColor = restored.strokeColor;
+          }
+        }
         else if (name === 'transform') matrix = multiplyMatrix(matrix, args);
+        else if (name === 'setStrokeRGBColor') {
+          strokeColor = typeof args?.[0] === 'string' ? args[0] : Array.from(args || []);
+        }
+        else if (name === 'setStrokeGray') strokeColor = [args?.[0], args?.[0], args?.[0]];
+        else if (name === 'setStrokeCMYKColor' || name === 'setStrokeColor' || name === 'setStrokeColorN') strokeColor = null;
         else if (name === 'beginMarkedContentProps') {
           markedContent.push(args?.[1]?.id || markedContent.at(-1) || null);
         } else if (name === 'beginMarkedContent') {
           markedContent.push(markedContent.at(-1) || null);
         } else if (name === 'endMarkedContent') {
           markedContent.pop();
-        } else if (name === 'constructPath' && proposedLayerId && markedContent.at(-1) === proposedLayerId) {
-          const points = parseConstructedPath(args, matrix);
-          if (points.length >= 6) {
-            const xs = points.map((point) => point[0]);
-            const ys = points.map((point) => point[1]);
-            const span = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
-            candidates.push({ page, pageNumber, points, span });
+        } else if (name === 'constructPath') {
+          const details = parseConstructedSubpathDetails(args, matrix);
+          const activeLayer = markedContent.at(-1);
+          if (proposedLayerId && activeLayer === proposedLayerId) {
+            const points = details.flatMap((path) => path.points);
+            if (points.length >= 6) {
+              const xs = points.map((point) => point[0]);
+              const ys = points.map((point) => point[1]);
+              const span = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+              candidates.push({ page, pageNumber, points, span });
+            }
           }
-        } else if (name === 'constructPath' && proposedHatchLayerId && markedContent.at(-1) === proposedHatchLayerId) {
-          parseConstructedSubpaths(args, matrix).forEach((points) => {
-            if (points.length >= 3) hatchPaths.push({ page, pageNumber, points });
-          });
-        } else if (name === 'constructPath' && sectionLayerId && markedContent.at(-1) === sectionLayerId) {
-          const points = parseConstructedPath(args, matrix);
-          if (points.length === 2) sectionSegments.push({ pageNumber, points });
+          if (proposedHatchLayerId && activeLayer === proposedHatchLayerId) {
+            details.forEach(({ points }) => {
+              if (points.length >= 3) hatchPaths.push({ page, pageNumber, points });
+            });
+          }
+          if (sectionLayerId && activeLayer === sectionLayerId) {
+            const points = details.flatMap((path) => path.points);
+            if (points.length === 2) sectionSegments.push({ pageNumber, points });
+          }
+          if (isRedStrokeColor(strokeColor)) {
+            details.forEach(({ points, closed }) => {
+              if (closed && points.length >= 3) {
+                redPaths.push({
+                  pageNumber,
+                  closed,
+                  points: points.map((point) => viewport.convertToViewportPoint(point[0], point[1])),
+                });
+              }
+            });
+          }
         }
       }
     }
-    if (!candidates.length && !hatchPaths.length) return null;
 
-    if (!candidates.length) {
+    if (!candidates.length && hatchPaths.length) {
       const pages = [...new Set(hatchPaths.map((path) => path.pageNumber))];
       const hatchCandidates = [];
       for (const pageNumber of pages) {
@@ -460,37 +539,51 @@ async function extractCadProposedBoundary(doc) {
       }
       hatchCandidates.sort((a, b) => Number(b.withinSectionDrawing) - Number(a.withinSectionDrawing) || a.area - b.area);
       const hatch = hatchCandidates[0];
-      if (!hatch?.withinSectionDrawing) return null;
+      if (hatch?.withinSectionDrawing) {
+        return {
+          kind: 'site-hatch',
+          pageNumber: hatch.pageNumber,
+          points: hatch.rings.flat(),
+          rings: hatch.rings,
+          sectionSegments: hatch.screenSegments,
+        };
+      }
+    }
+
+    if (candidates.length) {
+      candidates.sort((a, b) => b.span - a.span || b.points.length - a.points.length);
+      const candidate = candidates[0];
+      const viewport = candidate.page.getViewport({ scale: 1 });
+      const screenPoints = candidate.points.map((point) => viewport.convertToViewportPoint(point[0], point[1]));
+      const screenSegments = sectionSegments
+        .filter((segment) => segment.pageNumber === candidate.pageNumber)
+        .map((segment) => segment.points.map((point) => viewport.convertToViewportPoint(point[0], point[1])));
+      let [first, second] = principalEndpoints(screenPoints);
+      const horizontal = Math.abs(first[0] - second[0]) >= Math.abs(first[1] - second[1]);
+      const firstComesFirst = horizontal
+        ? first[0] <= second[0]
+        : first[1] <= second[1];
+      if (!firstComesFirst) [first, second] = [second, first];
+
       return {
-        kind: 'site-hatch',
-        pageNumber: hatch.pageNumber,
-        points: hatch.rings.flat(),
-        rings: hatch.rings,
-        sectionSegments: hatch.screenSegments,
+        kind: 'corridor',
+        pageNumber: candidate.pageNumber,
+        points: screenPoints,
+        startPoint: first,
+        endPoint: second,
+        sectionSegments: screenSegments,
       };
     }
 
-    candidates.sort((a, b) => b.span - a.span || b.points.length - a.points.length);
-    const candidate = candidates[0];
-    const viewport = candidate.page.getViewport({ scale: 1 });
-    const screenPoints = candidate.points.map((point) => viewport.convertToViewportPoint(point[0], point[1]));
-    const screenSegments = sectionSegments
-      .filter((segment) => segment.pageNumber === candidate.pageNumber)
-      .map((segment) => segment.points.map((point) => viewport.convertToViewportPoint(point[0], point[1])));
-    let [first, second] = principalEndpoints(screenPoints);
-    const horizontal = Math.abs(first[0] - second[0]) >= Math.abs(first[1] - second[1]);
-    const firstComesFirst = horizontal
-      ? first[0] <= second[0]
-      : first[1] <= second[1];
-    if (!firstComesFirst) [first, second] = [second, first];
-
+    const redMatch = matchClosedPathsByArea(redPaths, detected.planScale, detected.planAreas);
+    if (!redMatch) return null;
     return {
-      kind: 'corridor',
-      pageNumber: candidate.pageNumber,
-      points: screenPoints,
-      startPoint: first,
-      endPoint: second,
-      sectionSegments: screenSegments,
+      kind: 'red-site-plan',
+      pageNumber: redMatch.pageNumber,
+      points: redMatch.rings.flat(),
+      rings: redMatch.rings,
+      siteCenter: polygonCentroid(redMatch.siteRing),
+      hectares: redMatch.hectares,
     };
   } catch (err) {
     console.warn('A proposed CAD layer could not be extracted.', err);
@@ -679,12 +772,14 @@ function renderDetectedInfo(info, pages) {
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) found.push(`<strong>Coordinate:</strong> ${info.lat.toFixed(6)}, ${info.lon.toFixed(6)}`);
   if (Number.isFinite(info.width) && Number.isFinite(info.height)) found.push(`<strong>Likely dimensions:</strong> ${info.width} m × ${info.height} m`);
   if (Number.isFinite(info.planScale)) found.push(`<strong>Overview scale:</strong> 1:${info.planScale.toLocaleString()}`);
+  if (Number.isFinite(info.planAreas?.total)) found.push(`<strong>Printed total area:</strong> ${info.planAreas.total.toFixed(3)} ha`);
   if (info.sectionAnchors?.length > 1) {
     found.push(`<strong>ATS anchors:</strong> ${info.sectionAnchors.map((anchor) => `${anchor.part} ${anchor.legal}`).join(' and ')}`);
   }
   if (info.traverse) found.push(`<strong>Survey boundary:</strong> ${info.traverse.segments.length} bearing-and-distance calls`);
   if (info.cadBoundary?.kind === 'corridor') found.push(`<strong>Proposed CAD boundary:</strong> vector layer found between ${escapeHtml(info.legalLocations[0])} and ${escapeHtml(info.legalLocations[1])}`);
   if (info.cadBoundary?.kind === 'site-hatch') found.push('<strong>CAD site boundary:</strong> proposed/as-built hatch boundary and section grid found');
+  if (info.cadBoundary?.kind === 'red-site-plan') found.push(`<strong>Sketch boundary:</strong> ${info.cadBoundary.rings.length} area-matched red vector parts found`);
 
   if (!found.length) {
     $('detectedBox').innerHTML = '<strong>No reliable spatial text was detected.</strong><br>This is common with flattened PDFs. Enter the legal location and dimensions shown on the plan, then verify the result on the map.';
@@ -697,6 +792,8 @@ function renderDetectedInfo(info, pages) {
     ? 'The proposed corridor is extracted from the PDF CAD layer and aligned from its CAD section lines to Alberta Township System section corners. Confirm the preliminary alignment against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'site-hatch'
     ? 'The site boundary is extracted from the PDF CAD hatch and aligned from its section lines to Alberta Township System section corners. Confirm the boundary against the plan and imagery before download.'
+    : info.cadBoundary?.kind === 'red-site-plan'
+    ? 'The site and access boundaries are extracted from closed red PDF vectors, checked against the printed hectare values, and positioned from the proposed-site centre coordinate and overview scale. Confirm them against the plan and imagery before download.'
     : info.traverse
     ? 'The pad boundary will be reconstructed from the survey calls and positioned from the legal-land tie. Confirm it against the plan and imagery before download.'
     : sectionOnly
@@ -708,6 +805,7 @@ function renderDetectedInfo(info, pages) {
 function confidenceLabel(info) {
   if (info.cadBoundary?.kind === 'corridor' && info.legalLocations?.length >= 2) return 'Proposed CAD corridor and two legal anchors found';
   if (info.cadBoundary?.kind === 'site-hatch' && info.legal) return 'CAD site boundary and ATS section control found';
+  if (info.cadBoundary?.kind === 'red-site-plan') return 'Area-matched sketch vectors and site centre found';
   if (info.traverse && info.legal) return 'Survey traverse and legal tie found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon) && info.legal) return 'Good spatial anchors found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) return 'Coordinate found';
@@ -1032,6 +1130,39 @@ async function buildCadHatchBoundaryFromDetected() {
   } catch (err) {
     console.error('The CAD site boundary could not be positioned.', err);
     setPdfStatus(`The CAD site boundary was found, but it could not be positioned: ${err.message || err}`);
+  }
+}
+
+async function buildRedSiteBoundaryFromDetected() {
+  const cad = state.detected.cadBoundary;
+  const lat = state.detected.lat;
+  const lon = state.detected.lon;
+  const planScale = state.detected.planScale;
+  if (!cad?.siteCenter || !cad.rings?.length || !Number.isFinite(lat)
+    || !Number.isFinite(lon) || !Number.isFinite(planScale)) return;
+
+  try {
+    const targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
+    const metresPerPoint = planScale * 0.0254 / 72;
+    const transformPoint = (point) => {
+      const metres = [
+        targetCenter[0] + (point[0] - cad.siteCenter[0]) * metresPerPoint,
+        targetCenter[1] - (point[1] - cad.siteCenter[1]) * metresPerPoint,
+      ];
+      const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
+      return [pointLat, pointLon];
+    };
+    const rings = cad.rings.map((ring) => ring.map(transformPoint));
+    const corners = rings.length === 1 ? rings[0] : rings.map((ring) => [ring]);
+    const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
+    replaceBoundary(layer);
+    state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 17 });
+    const extractedArea = (cad.hectares || []).reduce((sum, value) => sum + value, 0);
+    const partsLabel = rings.length === 1 ? 'site boundary' : `site and access boundaries (${rings.length} parts)`;
+    setPdfStatus(`Closed red vector ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from the proposed-site centre coordinate. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
+  } catch (err) {
+    console.error('The red sketch boundary could not be positioned.', err);
+    setPdfStatus(`The red sketch boundary was found, but it could not be positioned: ${err.message || err}`);
   }
 }
 

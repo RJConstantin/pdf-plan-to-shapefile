@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanScale, detectSectionAnchors } from '../plan-parser.mjs';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from '../plan-parser.mjs';
 
 test('detects the Clear North pad-coded LSD location', () => {
   const text = 'CLEAR NORTH GIFT 5P-18-79-12-5 PAGE 5/7';
@@ -54,6 +54,30 @@ test('detects two adjoining quarter-section anchors from a borrow-pit filename',
 
 test('uses the overview scale when a plan also contains larger details', () => {
   assert.equal(detectPlanScale('SCALE 1:5000 DETAIL SCALE 1:1000'), 5000);
+  assert.equal(detectPlanScale('SCALE 1:2500 OVERVIEW SCALE 1:10 000'), 10000);
+});
+
+test('detects proposed coordinates when PDF extraction places values before their labels', () => {
+  const text = 'PROPOSED COORDINATES UTM 570342.52 6189333.51 Latitude -115.876617 55.844408 Longitude = = NAD 83';
+  assert.deepEqual(detectPlanCoordinates(text), { lat: 55.844408, lon: -115.876617 });
+});
+
+test('detects proposed coordinates from unsigned latitude and signed longitude DMS values', () => {
+  const text = 'PROPOSED COORDINATES Latitude -115°52\'35.8" 55°50\'39.9" Longitude';
+  const result = detectPlanCoordinates(text);
+  assert.ok(Math.abs(result.lat - 55.8444167) < 1e-6);
+  assert.ok(Math.abs(result.lon + 115.8766111) < 1e-6);
+});
+
+test('detects sketch-plan areas in visual and PDF extraction order', () => {
+  assert.deepEqual(
+    detectPlanAreas('WELL SITE = 4.598 ha EXISTING ACCESS ROAD = 3.244 ha TOTAL = 7.842 ha'),
+    { site: 4.598, access: 3.244, total: 7.842 }
+  );
+  assert.deepEqual(
+    detectPlanAreas('= 4.598 ha (11.36 ac.) WELL SITE = 3.244 ha (8.02 ac.) EXISTING ACCESS ROAD = 7.842 ha (19.38 ac.) TOTAL'),
+    { site: 4.598, access: 3.244, total: 7.842 }
+  );
 });
 
 test('rejects out-of-range legal locations', () => {

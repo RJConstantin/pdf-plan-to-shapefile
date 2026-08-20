@@ -70,10 +70,68 @@ export function detectSectionAnchors(text) {
 
 export function detectPlanScale(text) {
   if (!text) return null;
-  const scales = [...text.matchAll(/\bSCALE\s*1\s*:\s*(\d{2,6})\b/gi)]
-    .map((match) => Number(match[1]))
+  const scales = [...text.matchAll(/\bSCALE\s*1\s*:\s*((?:\d{1,3}[ ,]\d{3})|\d{2,6})\b/gi)]
+    .map((match) => Number(match[1].replace(/[ ,]/g, '')))
     .filter((value) => value >= 100 && value <= 100000);
   return scales.length ? Math.max(...scales) : null;
+}
+
+export function detectPlanCoordinates(text) {
+  if (!text) return null;
+  const source = String(text).replace(/\s+/g, ' ');
+
+  const labelledLatitude = source.match(/\bLATITUDE\s*[:=]?\s*(\d{2}\.\d{4,})\b/i);
+  const labelledLongitude = source.match(/\bLONGITUDE\s*[:=]?\s*(-?\d{3}\.\d{4,})\b/i);
+  if (labelledLatitude && labelledLongitude) {
+    const lat = Number(labelledLatitude[1]);
+    const lon = Number(labelledLongitude[1]);
+    if (lat >= 49 && lat <= 61 && lon >= -120 && lon <= -109) return { lat, lon };
+  }
+
+  const marker = source.search(/\bPROPOSED\s+COORDINATES\b/i);
+  const coordinateBlock = marker >= 0 ? source.slice(marker, marker + 1200) : source;
+  const decimals = [...coordinateBlock.matchAll(/-?\d{2,3}\.\d{4,}/g)]
+    .map((match) => Number(match[0]));
+  const lat = decimals.find((value) => value >= 49 && value <= 61);
+  const lon = decimals.find((value) => value >= -120 && value <= -109);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+
+  const dmsValues = [...coordinateBlock.matchAll(/(-?\d{2,3})[°º]\s*(\d{1,2})['’]\s*(\d{1,2}(?:\.\d+)?)\s*["”]?/g)]
+    .map((match) => {
+      const degrees = Number(match[1]);
+      const magnitude = Math.abs(degrees) + Number(match[2]) / 60 + Number(match[3]) / 3600;
+      return degrees < 0 ? -magnitude : magnitude;
+    });
+  const dmsLat = dmsValues.find((value) => value >= 49 && value <= 61);
+  const dmsLonValue = dmsValues.find((value) => Math.abs(value) >= 109 && Math.abs(value) <= 120);
+  if (Number.isFinite(dmsLat) && Number.isFinite(dmsLonValue)) {
+    return { lat: dmsLat, lon: -Math.abs(dmsLonValue) };
+  }
+  return null;
+}
+
+function labelledArea(text, label, valuesBeforeLabels) {
+  const number = String.raw`(\d{1,3}(?:[.,]\d{1,4})?)`;
+  const acres = String.raw`(?:\s*\([^)]*\bac\.?\s*\))?`;
+  const after = text.match(new RegExp(`\\b${label}\\b\\s*=\\s*${number}\\s*ha\\b`, 'i'));
+  const before = text.match(new RegExp(`=\\s*${number}\\s*ha\\b${acres}\\s*\\b${label}\\b`, 'i'));
+  const raw = valuesBeforeLabels ? before?.[1] : after?.[1];
+  return raw ? Number(raw.replace(',', '.')) : null;
+}
+
+export function detectPlanAreas(text) {
+  if (!text) return null;
+  const source = String(text).replace(/\s+/g, ' ');
+  const areasIndex = source.search(/\bAREAS\s*:/i);
+  const areaBlock = areasIndex >= 0 ? source.slice(areasIndex, areasIndex + 600) : source;
+  const firstValue = areaBlock.search(/=\s*\d{1,3}(?:[.,]\d{1,4})?\s*ha\b/i);
+  const firstLabel = areaBlock.search(/\b(?:WELL\s+SITE|EXISTING\s+ACCESS\s+ROAD|TOTAL)\b/i);
+  const valuesBeforeLabels = firstValue >= 0 && (firstLabel < 0 || firstValue < firstLabel);
+  const site = labelledArea(areaBlock, 'WELL\\s+SITE', valuesBeforeLabels);
+  const access = labelledArea(areaBlock, 'EXISTING\\s+ACCESS\\s+ROAD', valuesBeforeLabels);
+  const total = labelledArea(areaBlock, 'TOTAL', valuesBeforeLabels);
+  if (![site, access, total].some(Number.isFinite)) return null;
+  return { site, access, total };
 }
 
 export function detectLegalLocation(text) {

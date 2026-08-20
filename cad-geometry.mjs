@@ -110,3 +110,45 @@ export function extractHatchRings(paths) {
   const cleaned = paths.map(cleanPath).filter((path) => path.length >= 3);
   return sharedEdgeGroups(cleaned).flatMap(traceBoundaryRings);
 }
+
+function polygonArea(points) {
+  return Math.abs(points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return sum + point[0] * next[1] - next[0] * point[1];
+  }, 0)) / 2;
+}
+
+export function matchClosedPathsByArea(paths, planScale, targetAreas, tolerance = 0.08) {
+  if (!(Number.isFinite(planScale) && planScale > 0 && Number.isFinite(targetAreas?.site))) return null;
+  const metresPerPoint = planScale * 0.0254 / 72;
+  const candidates = paths
+    .filter((path) => path?.closed && path.points?.length >= 3)
+    .map((path) => ({
+      ...path,
+      hectares: polygonArea(path.points) * metresPerPoint ** 2 / 10000,
+    }));
+  const relativeError = (candidate, target) => Math.abs(candidate.hectares - target) / target;
+  const choose = (target, excluded, pageNumber = null) => candidates
+    .filter((candidate) => candidate !== excluded && (pageNumber == null || candidate.pageNumber === pageNumber))
+    .sort((a, b) => relativeError(a, target) - relativeError(b, target))[0];
+
+  const site = choose(targetAreas.site, null);
+  if (!site || relativeError(site, targetAreas.site) > tolerance) return null;
+  const selected = [site];
+  let access = null;
+  if (Number.isFinite(targetAreas.access)) {
+    access = choose(targetAreas.access, site, site.pageNumber);
+    if (!access || relativeError(access, targetAreas.access) > tolerance) return null;
+    selected.push(access);
+  }
+  if (Number.isFinite(targetAreas.total)) {
+    const selectedTotal = selected.reduce((sum, candidate) => sum + candidate.hectares, 0);
+    if (Math.abs(selectedTotal - targetAreas.total) / targetAreas.total > tolerance) return null;
+  }
+  return {
+    pageNumber: site.pageNumber,
+    rings: selected.map((candidate) => candidate.points),
+    siteRing: site.points,
+    hectares: selected.map((candidate) => candidate.hectares),
+  };
+}

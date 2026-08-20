@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.36';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.36';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.36';
+import { detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.37';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.37';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.37';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -706,6 +706,7 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
     const hatchPaths = [];
     const sectionSegments = [];
     const surveyControlSegments = [];
+    const surveyControlLabels = [];
     const redPaths = [];
     const closedVectorPaths = [];
     const surveyFillPaths = [];
@@ -725,6 +726,19 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
       const operatorList = await page.getOperatorList();
       const viewport = page.getViewport({ scale: 1 });
       pageSizes.set(pageNumber, { width: viewport.width, height: viewport.height });
+      if (collectSurveyControls) {
+        const textContent = await page.getTextContent();
+        textContent.items.forEach((item) => {
+          const label = String(item.str || '').replace(/\s+/g, '').toUpperCase();
+          if (/^N\.?-?S\.?1\/4$/.test(label)) {
+            surveyControlLabels.push({
+              pageNumber,
+              kind: 'north-south-quarter',
+              point: viewport.convertToViewportPoint(item.transform[4], item.transform[5]),
+            });
+          }
+        });
+      }
       if (detected.dloPlan && Number.isFinite(detected.lat) && Number.isFinite(detected.lon)) {
         const textContent = await page.getTextContent();
         const locatedItems = textContent.items.map((item) => {
@@ -1050,6 +1064,8 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
             surveyControlSegments: surveyControlSegments
               .filter((segment) => segment.pageNumber === group[0].match.pageNumber)
               .map((segment) => segment.points),
+            surveyControlLabels: surveyControlLabels
+              .filter((label) => label.pageNumber === group[0].match.pageNumber),
             recommendationRank: 72 - index,
           });
         });
@@ -1653,6 +1669,19 @@ function findPlanVerticalLegalControl(cad, rings, metresPerPoint) {
     localPlanOffset(point, siteCenter, cad.pageQuarterTurns, metresPerPoint)
   ));
   const siteBounds = pointBounds(siteOffsets);
+  const labelledControl = (cad.surveyControlLabels || [])
+    .filter((label) => label.kind === 'north-south-quarter')
+    .map((label) => {
+      const offset = localPlanOffset(label.point, siteCenter, cad.pageQuarterTurns, metresPerPoint);
+      const east = offset[0];
+      const outsideDistance = east > siteBounds[2]
+        ? east - siteBounds[2]
+        : east < siteBounds[0] ? siteBounds[0] - east : 0;
+      return { labelPoint: label.point, east, outsideDistance };
+    })
+    .filter((control) => control.outsideDistance >= 5 && control.outsideDistance <= 350)
+    .sort((a, b) => a.outsideDistance - b.outsideDistance)[0];
+  if (labelledControl) return labelledControl;
   return (cad.surveyControlSegments || [])
     .map((segment) => {
       const endpoints = [segment[0], segment.at(-1)];
@@ -1719,11 +1748,15 @@ async function buildSurveyTiedPlanRings(cad, legal, tie, planScale) {
       let transformedSite = siteRing.map(transformPoint);
       let eastingControl = null;
       if (verticalLegalControl) {
-        const controlPoints = [
-          verticalLegalControl.segment[0],
-          verticalLegalControl.segment.at(-1),
-        ].map(transformPoint);
-        const mappedEasting = (controlPoints[0][0] + controlPoints[1][0]) / 2;
+        const mappedEasting = verticalLegalControl.labelPoint
+          ? transformPoint(verticalLegalControl.labelPoint)[0]
+          : (() => {
+              const controlPoints = [
+                verticalLegalControl.segment[0],
+                verticalLegalControl.segment.at(-1),
+              ].map(transformPoint);
+              return (controlPoints[0][0] + controlPoints[1][0]) / 2;
+            })();
         const targetEasting = verticalLegalControl.east > 0 ? parcelBounds[2] : parcelBounds[0];
         const eastingShift = targetEasting - mappedEasting;
         transformedRings = transformedRings.map((ring) => (

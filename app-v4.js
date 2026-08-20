@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.3';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.4';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -137,7 +137,11 @@ async function handlePdf(file) {
     }
 
     state.pdfText = text.replace(/\s+/g, ' ').trim();
-    state.detected = detectPlanInfo(state.pdfText);
+    state.detected = detectPlanInfo(`${file.name} ${state.pdfText}`);
+    const cadBoundary = await extractCadProposedBoundary(doc);
+    if (cadBoundary && state.detected.legalLocations?.length >= 2) {
+      state.detected.cadBoundary = cadBoundary;
+    }
     applyDetectedFields(state.detected);
     renderDetectedInfo(state.detected, doc.numPages);
     setPdfStatus(state.pdfText.length > 40
@@ -146,7 +150,9 @@ async function handlePdf(file) {
     $('pdfConfidence').textContent = confidenceLabel(state.detected);
 
     const located = await locateFromFields();
-    if (state.detected.traverse) {
+    if (state.detected.cadBoundary) {
+      await buildCadBoundaryFromDetected();
+    } else if (state.detected.traverse) {
       await buildTraverseFromDetected(located);
     } else if (numberValue('widthInput') && numberValue('heightInput')) {
       buildRectangleFromFields();
@@ -195,6 +201,8 @@ function detectPlanInfo(text) {
 
   const legal = detectLegalLocation(text);
   if (legal) result.legal = legal;
+  result.legalLocations = detectLegalLocations(text);
+  if (!result.legal && result.legalLocations.length) result.legal = result.legalLocations[0];
 
   const dimensions = detectExplicitDimensions(text);
   if (dimensions) {
@@ -206,6 +214,153 @@ function detectPlanInfo(text) {
   if (traverse) result.traverse = traverse;
 
   return result;
+}
+
+function multiplyMatrix(a, b) {
+  return [
+    a[0] * b[0] + a[2] * b[1],
+    a[1] * b[0] + a[3] * b[1],
+    a[0] * b[2] + a[2] * b[3],
+    a[1] * b[2] + a[3] * b[3],
+    a[0] * b[4] + a[2] * b[5] + a[4],
+    a[1] * b[4] + a[3] * b[5] + a[5],
+  ];
+}
+
+function matrixPoint(matrix, point) {
+  return [
+    matrix[0] * point[0] + matrix[2] * point[1] + matrix[4],
+    matrix[1] * point[0] + matrix[3] * point[1] + matrix[5],
+  ];
+}
+
+function parseConstructedPath(args, matrix) {
+  const values = Object.values(args?.[1] || {});
+  const points = [];
+  for (let i = 0; i < values.length;) {
+    const command = values[i++];
+    if (command === 0 || command === 1) {
+      if (i + 1 >= values.length) break;
+      points.push(matrixPoint(matrix, [Number(values[i]), Number(values[i + 1])]));
+      i += 2;
+    } else if (command === 2) {
+      if (i + 5 >= values.length) break;
+      points.push(matrixPoint(matrix, [Number(values[i + 4]), Number(values[i + 5])]));
+      i += 6;
+    } else if (command === 3) {
+      if (i + 3 >= values.length) break;
+      points.push(matrixPoint(matrix, [Number(values[i + 2]), Number(values[i + 3])]));
+      i += 4;
+    } else if (command === 4) {
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const cleaned = points.filter((point, index) => (
+    index === 0 || Math.hypot(point[0] - points[index - 1][0], point[1] - points[index - 1][1]) > 1e-6
+  ));
+  if (cleaned.length > 2) {
+    const first = cleaned[0];
+    const last = cleaned[cleaned.length - 1];
+    if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6) cleaned.pop();
+  }
+  return cleaned;
+}
+
+function principalEndpoints(points) {
+  const centerX = points.reduce((sum, point) => sum + point[0], 0) / points.length;
+  const centerY = points.reduce((sum, point) => sum + point[1], 0) / points.length;
+  let xx = 0;
+  let xy = 0;
+  let yy = 0;
+  points.forEach(([x, y]) => {
+    const dx = x - centerX;
+    const dy = y - centerY;
+    xx += dx * dx;
+    xy += dx * dy;
+    yy += dy * dy;
+  });
+  const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+  const axis = [Math.cos(angle), Math.sin(angle)];
+  const projections = points.map(([x, y]) => (x - centerX) * axis[0] + (y - centerY) * axis[1]);
+  const minimum = Math.min(...projections);
+  const maximum = Math.max(...projections);
+  const tolerance = (maximum - minimum) * 0.02;
+  const average = (items) => [
+    items.reduce((sum, point) => sum + point[0], 0) / items.length,
+    items.reduce((sum, point) => sum + point[1], 0) / items.length,
+  ];
+  return [
+    average(points.filter((point, index) => projections[index] <= minimum + tolerance)),
+    average(points.filter((point, index) => projections[index] >= maximum - tolerance)),
+  ];
+}
+
+async function extractCadProposedBoundary(doc) {
+  try {
+    const config = await doc.getOptionalContentConfig();
+    const order = (config.getOrder?.() || []).flat(Infinity).filter((id) => typeof id === 'string');
+    const proposedLayerId = order.find((id) => /^P-PROPOSED$/i.test(config.getGroup(id)?.name || ''));
+    if (!proposedLayerId) return null;
+
+    const candidates = [];
+    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+      const page = await doc.getPage(pageNumber);
+      const operatorList = await page.getOperatorList();
+      const names = Object.fromEntries(Object.entries(pdfjsLib.OPS).map(([name, code]) => [code, name]));
+      const graphicsStack = [];
+      const markedContent = [];
+      let matrix = [1, 0, 0, 1, 0, 0];
+
+      for (let index = 0; index < operatorList.fnArray.length; index += 1) {
+        const name = names[operatorList.fnArray[index]];
+        const args = operatorList.argsArray[index];
+        if (name === 'save') graphicsStack.push(matrix.slice());
+        else if (name === 'restore') matrix = graphicsStack.pop() || matrix;
+        else if (name === 'transform') matrix = multiplyMatrix(matrix, args);
+        else if (name === 'beginMarkedContentProps') {
+          markedContent.push(args?.[1]?.id || markedContent.at(-1) || null);
+        } else if (name === 'beginMarkedContent') {
+          markedContent.push(markedContent.at(-1) || null);
+        } else if (name === 'endMarkedContent') {
+          markedContent.pop();
+        } else if (name === 'constructPath' && markedContent.at(-1) === proposedLayerId) {
+          const points = parseConstructedPath(args, matrix);
+          if (points.length >= 6) {
+            const xs = points.map((point) => point[0]);
+            const ys = points.map((point) => point[1]);
+            const span = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+            candidates.push({ page, pageNumber, points, span });
+          }
+        }
+      }
+    }
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => b.span - a.span || b.points.length - a.points.length);
+    const candidate = candidates[0];
+    let [first, second] = principalEndpoints(candidate.points);
+    const viewport = candidate.page.getViewport({ scale: 1 });
+    const firstScreen = viewport.convertToViewportPoint(first[0], first[1]);
+    const secondScreen = viewport.convertToViewportPoint(second[0], second[1]);
+    const horizontal = Math.abs(firstScreen[0] - secondScreen[0]) >= Math.abs(firstScreen[1] - secondScreen[1]);
+    const firstComesFirst = horizontal
+      ? firstScreen[0] <= secondScreen[0]
+      : firstScreen[1] <= secondScreen[1];
+    if (!firstComesFirst) [first, second] = [second, first];
+
+    return {
+      pageNumber: candidate.pageNumber,
+      points: candidate.points,
+      startPoint: first,
+      endPoint: second,
+    };
+  } catch (err) {
+    console.warn('A proposed CAD layer could not be extracted.', err);
+    return null;
+  }
 }
 
 function dmsToDecimal(d, m, s, west) {
@@ -227,6 +382,7 @@ function renderDetectedInfo(info, pages) {
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) found.push(`<strong>Coordinate:</strong> ${info.lat.toFixed(6)}, ${info.lon.toFixed(6)}`);
   if (Number.isFinite(info.width) && Number.isFinite(info.height)) found.push(`<strong>Likely dimensions:</strong> ${info.width} m × ${info.height} m`);
   if (info.traverse) found.push(`<strong>Survey boundary:</strong> ${info.traverse.segments.length} bearing-and-distance calls`);
+  if (info.cadBoundary) found.push(`<strong>Proposed CAD boundary:</strong> vector layer found between ${escapeHtml(info.legalLocations[0])} and ${escapeHtml(info.legalLocations[1])}`);
 
   if (!found.length) {
     $('detectedBox').innerHTML = '<strong>No reliable spatial text was detected.</strong><br>This is common with flattened PDFs. Enter the legal location and dimensions shown on the plan, then verify the result on the map.';
@@ -235,7 +391,9 @@ function renderDetectedInfo(info, pages) {
 
   const sectionOnly = info.legal?.startsWith('SEC-')
     && !Number.isFinite(info.lat) && !Number.isFinite(info.lon);
-  const note = info.traverse
+  const note = info.cadBoundary
+    ? 'The proposed corridor is extracted from the PDF CAD layer and approximately anchored between the two legal locations. Confirm the preliminary alignment against the plan and imagery before download.'
+    : info.traverse
     ? 'The pad boundary will be reconstructed from the survey calls and positioned from the legal-land tie. Confirm it against the plan and imagery before download.'
     : sectionOnly
     ? 'This identifies the section only. The PDF page does not provide an exact coordinate anchor, so the site position and boundary must be confirmed manually.'
@@ -244,6 +402,7 @@ function renderDetectedInfo(info, pages) {
 }
 
 function confidenceLabel(info) {
+  if (info.cadBoundary && info.legalLocations?.length >= 2) return 'Proposed CAD corridor and two legal anchors found';
   if (info.traverse && info.legal) return 'Survey traverse and legal tie found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon) && info.legal) return 'Good spatial anchors found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) return 'Coordinate found';
@@ -394,6 +553,72 @@ function offsetLatLon(lat, lon, eastM, northM) {
   const dLat = northM / r;
   const dLon = eastM / (r * Math.cos(lat * Math.PI / 180));
   return [lat + dLat * 180 / Math.PI, lon + dLon * 180 / Math.PI];
+}
+
+async function buildCadBoundaryFromDetected() {
+  const cad = state.detected.cadBoundary;
+  const legalValues = state.detected.legalLocations?.slice(0, 2) || [];
+  if (!cad || legalValues.length < 2) return;
+
+  try {
+    const legal = legalValues.map(parseLegal);
+    if (legal.some((value) => !value)) throw new Error('Two valid endpoint legal locations are required.');
+    const [startFeature, endFeature] = await Promise.all(legal.map(queryAtsLegal));
+    const startLonLat = geojsonCenter(startFeature.geometry);
+    const endLonLat = geojsonCenter(endFeature.geometry);
+
+    const earthRadius = 6378137;
+    const latitude0 = (startLonLat[1] + endLonLat[1]) / 2 * Math.PI / 180;
+    const toMetres = ([lon, lat]) => [
+      lon * Math.PI / 180 * earthRadius * Math.cos(latitude0),
+      lat * Math.PI / 180 * earthRadius,
+    ];
+    const toLonLat = ([east, north]) => [
+      east / (earthRadius * Math.cos(latitude0)) * 180 / Math.PI,
+      north / earthRadius * 180 / Math.PI,
+    ];
+
+    const startMetres = toMetres(startLonLat);
+    const endMetres = toMetres(endLonLat);
+    const sourceVector = [
+      cad.endPoint[0] - cad.startPoint[0],
+      cad.endPoint[1] - cad.startPoint[1],
+    ];
+    const targetVector = [
+      endMetres[0] - startMetres[0],
+      endMetres[1] - startMetres[1],
+    ];
+    const sourceLength = Math.hypot(...sourceVector);
+    const targetLength = Math.hypot(...targetVector);
+    if (!(sourceLength > 0 && targetLength > 0)) throw new Error('The proposed corridor endpoints could not be resolved.');
+    const scale = targetLength / sourceLength;
+    const rotation = Math.atan2(targetVector[1], targetVector[0])
+      - Math.atan2(sourceVector[1], sourceVector[0]);
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
+
+    const corners = cad.points.map((point) => {
+      const x = point[0] - cad.startPoint[0];
+      const y = point[1] - cad.startPoint[1];
+      const metres = [
+        startMetres[0] + scale * (x * cos - y * sin),
+        startMetres[1] + scale * (x * sin + y * cos),
+      ];
+      const [lon, lat] = toLonLat(metres);
+      return [lat, lon];
+    });
+
+    const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
+    replaceBoundary(layer);
+    state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 16 });
+    const center = layer.getBounds().getCenter();
+    $('latInput').value = center.lat.toFixed(7);
+    $('lonInput').value = center.lng.toFixed(7);
+    setPdfStatus(`Preliminary corridor polygon extracted from CAD layer P-PROPOSED and anchored from ${legalValues[0]} to ${legalValues[1]}. Verify the orange boundary before confirming.`);
+  } catch (err) {
+    console.error('The proposed CAD corridor could not be positioned.', err);
+    setPdfStatus(`The proposed CAD layer was found, but it could not be positioned: ${err.message || err}`);
+  }
 }
 
 async function buildTraverseFromDetected(located) {

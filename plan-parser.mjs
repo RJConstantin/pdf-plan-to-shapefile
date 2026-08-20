@@ -63,6 +63,31 @@ export function detectLegalLocation(text) {
   return null;
 }
 
+export function detectLegalLocations(text) {
+  if (!text) return [];
+
+  const locations = [];
+  const seen = new Set();
+  const patterns = [
+    /\b(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,3})\s*-\s*(\d{1,2})\s*-\s*W?\s*([456])\s*M?(?!\d)/gi,
+    /\b(?:LSD|L\.S\.)\s*(\d{1,2})\s+(?:SEC(?:TION)?\.?\s*)?(\d{1,2})\s+(?:TWP\.?\s*)?(\d{1,3})\s+(?:RGE\.?\s*)?(\d{1,2})\s+W\.?\s*([456])\s*M\.?/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const values = match.slice(1, 6).map(Number);
+      if (!validLsd(...values)) continue;
+      const [lsd, section, township, range, meridian] = values;
+      const legal = `${lsd}-${section}-${township}-${range}-W${meridian}M`;
+      if (!seen.has(legal)) {
+        seen.add(legal);
+        locations.push(legal);
+      }
+    }
+  }
+  return locations;
+}
+
 export function detectExplicitDimensions(text) {
   if (!text) return null;
 

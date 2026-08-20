@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectExplicitDimensions, detectLegalLocation, detectPadTraverse } from '../plan-parser.mjs';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from '../plan-parser.mjs';
 
 test('detects the Clear North pad-coded LSD location', () => {
   const text = 'CLEAR NORTH GIFT 5P-18-79-12-5 PAGE 5/7';
@@ -64,4 +64,12 @@ test('detects the Clear North closed pad traverse and tie line', () => {
     north += segment.distance * Math.cos(radians);
   }
   assert.ok(Math.hypot(east, north) < 0.01);
+});
+
+test('detects both endpoint legal locations in a preliminary pipeline filename', () => {
+  const text = '(Option A) PLA 11-15-73-17-4 to 4-24-73-17-4_Rev0 Prelim.pdf';
+  assert.deepEqual(detectLegalLocations(text), [
+    '11-15-73-17-W4M',
+    '4-24-73-17-W4M',
+  ]);
 });

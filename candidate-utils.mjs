@@ -5,6 +5,23 @@ function finitePoint(point) {
     && Number.isFinite(point[1]);
 }
 
+export function isPlanRedColor(value) {
+  let components = null;
+  if (typeof value === 'string') {
+    const match = value.trim().match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+    if (match) components = match.slice(1).map((component) => Number.parseInt(component, 16) / 255);
+  } else if ((Array.isArray(value) || ArrayBuffer.isView(value)) && value.length >= 3) {
+    const raw = Array.from(value).slice(0, 3);
+    if (raw.every(Number.isFinite)) {
+      const divisor = Math.max(...raw) > 1 ? 255 : 1;
+      components = raw.map((component) => component / divisor);
+    }
+  }
+  if (!components) return false;
+  const [red, green, blue] = components;
+  return red >= 0.7 && green <= 0.3 && blue <= 0.3;
+}
+
 export function inferPageRotationQuarterTurns(textItems, viewportTransform) {
   if (!Array.isArray(textItems) || !Array.isArray(viewportTransform)
     || viewportTransform.length < 4) return 0;

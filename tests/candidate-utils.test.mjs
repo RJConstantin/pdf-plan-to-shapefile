@@ -9,6 +9,7 @@ import {
   findProminentVectorCandidates,
   inferPageRotationQuarterTurns,
   inferPlanScaleFromVectorDimensions,
+  isPlanRedColor,
   rankBoundaryCandidates,
   rotateScreenOffsetQuarterTurns,
 } from '../candidate-utils.mjs';
@@ -108,4 +109,11 @@ test('rotates screen offsets clockwise around their anchor', () => {
   assert.deepEqual(rotateScreenOffsetQuarterTurns([10, 20], 1), [-20, 10]);
   assert.deepEqual(rotateScreenOffsetQuarterTurns([10, 20], 2), [-10, -20]);
   assert.deepEqual(rotateScreenOffsetQuarterTurns([10, 20], 3), [20, -10]);
+});
+
+test('accepts the orange-red CAD stroke used by survey plans', () => {
+  assert.equal(isPlanRedColor('#ff2e17'), true);
+  assert.equal(isPlanRedColor('#ff0000'), true);
+  assert.equal(isPlanRedColor([255, 46, 23]), true);
+  assert.equal(isPlanRedColor('#6b7f91'), false);
 });

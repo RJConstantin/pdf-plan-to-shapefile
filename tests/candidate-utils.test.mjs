@@ -31,7 +31,7 @@ test('preserves every multipart ring in a candidate preview', () => {
 
 test('fingerprints duplicate vector candidates consistently', () => {
   const first = { points: [[1, 2], [3, 2], [3, 4], [1, 4]] };
-  const duplicate = { rings: [[[1, 2], [3, 2], [3, 4], [1, 4]]] };
+  const duplicate = { rings: [[[10, 20], [30, 20], [30, 40], [10, 40]]] };
   assert.equal(candidateFingerprint(first), candidateFingerprint(duplicate));
 });
 

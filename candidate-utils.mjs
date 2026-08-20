@@ -19,9 +19,7 @@ function downsampleRing(ring, limit = 320) {
 }
 
 export function candidateFingerprint(candidate) {
-  return candidateRings(candidate).map((ring) => (
-    downsampleRing(ring).map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(';')
-  )).join('|');
+  return candidatePreviewPaths(candidate).join('|');
 }
 
 export function candidatePreviewPaths(candidate, width = 260, height = 132, padding = 9) {

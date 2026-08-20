@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.5';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.6';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -307,9 +307,11 @@ async function extractCadProposedBoundary(doc) {
     const config = await doc.getOptionalContentConfig();
     const order = (config.getOrder?.() || []).flat(Infinity).filter((id) => typeof id === 'string');
     const proposedLayerId = order.find((id) => /^P-PROPOSED$/i.test(config.getGroup(id)?.name || ''));
+    const sectionLayerId = order.find((id) => /^L-USEC$/i.test(config.getGroup(id)?.name || ''));
     if (!proposedLayerId) return null;
 
     const candidates = [];
+    const sectionSegments = [];
     for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
       const page = await doc.getPage(pageNumber);
       const operatorList = await page.getOperatorList();
@@ -338,6 +340,9 @@ async function extractCadProposedBoundary(doc) {
             const span = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
             candidates.push({ page, pageNumber, points, span });
           }
+        } else if (name === 'constructPath' && markedContent.at(-1) === sectionLayerId) {
+          const points = parseConstructedPath(args, matrix);
+          if (points.length === 2) sectionSegments.push({ pageNumber, points });
         }
       }
     }
@@ -345,26 +350,118 @@ async function extractCadProposedBoundary(doc) {
 
     candidates.sort((a, b) => b.span - a.span || b.points.length - a.points.length);
     const candidate = candidates[0];
-    let [first, second] = principalEndpoints(candidate.points);
     const viewport = candidate.page.getViewport({ scale: 1 });
-    const firstScreen = viewport.convertToViewportPoint(first[0], first[1]);
-    const secondScreen = viewport.convertToViewportPoint(second[0], second[1]);
-    const horizontal = Math.abs(firstScreen[0] - secondScreen[0]) >= Math.abs(firstScreen[1] - secondScreen[1]);
+    const screenPoints = candidate.points.map((point) => viewport.convertToViewportPoint(point[0], point[1]));
+    const screenSegments = sectionSegments
+      .filter((segment) => segment.pageNumber === candidate.pageNumber)
+      .map((segment) => segment.points.map((point) => viewport.convertToViewportPoint(point[0], point[1])));
+    let [first, second] = principalEndpoints(screenPoints);
+    const horizontal = Math.abs(first[0] - second[0]) >= Math.abs(first[1] - second[1]);
     const firstComesFirst = horizontal
-      ? firstScreen[0] <= secondScreen[0]
-      : firstScreen[1] <= secondScreen[1];
+      ? first[0] <= second[0]
+      : first[1] <= second[1];
     if (!firstComesFirst) [first, second] = [second, first];
 
     return {
       pageNumber: candidate.pageNumber,
-      points: candidate.points,
+      points: screenPoints,
       startPoint: first,
       endPoint: second,
+      sectionSegments: screenSegments,
     };
   } catch (err) {
     console.warn('A proposed CAD layer could not be extracted.', err);
     return null;
   }
+}
+
+function clusterGridLines(lines, tolerance = 18) {
+  const sorted = lines.slice().sort((a, b) => a.reference - b.reference);
+  const groups = [];
+  sorted.forEach((line) => {
+    let group = groups.at(-1);
+    if (!group || line.reference - group.reference > tolerance) {
+      group = { reference: line.reference, lines: [] };
+      groups.push(group);
+    }
+    group.lines.push(line);
+    group.reference = group.lines.reduce((sum, item) => sum + item.reference, 0) / group.lines.length;
+  });
+  return groups.filter((group) => group.lines.length >= 4);
+}
+
+function fitGridLine(group, vertical) {
+  const points = group.lines.flatMap((line) => line.points);
+  const independent = points.map((point) => point[vertical ? 1 : 0]);
+  const dependent = points.map((point) => point[vertical ? 0 : 1]);
+  const meanIndependent = independent.reduce((sum, value) => sum + value, 0) / independent.length;
+  const meanDependent = dependent.reduce((sum, value) => sum + value, 0) / dependent.length;
+  let numerator = 0;
+  let denominator = 0;
+  independent.forEach((value, index) => {
+    const delta = value - meanIndependent;
+    numerator += delta * (dependent[index] - meanDependent);
+    denominator += delta * delta;
+  });
+  return {
+    slope: denominator > 0 ? numerator / denominator : 0,
+    intercept: meanDependent - (denominator > 0 ? numerator / denominator : 0) * meanIndependent,
+    reference: group.reference,
+  };
+}
+
+function intersectGridLines(vertical, horizontal) {
+  const denominator = 1 - vertical.slope * horizontal.slope;
+  if (Math.abs(denominator) < 1e-9) return null;
+  const y = (horizontal.slope * vertical.intercept + horizontal.intercept) / denominator;
+  return [vertical.slope * y + vertical.intercept, y];
+}
+
+function findCadSectionControls(cad) {
+  const start = cad.startPoint;
+  const end = cad.endPoint;
+  const centerX = (start[0] + end[0]) / 2;
+  const centerY = (start[1] + end[1]) / 2;
+  const spanX = Math.abs(end[0] - start[0]);
+  const spanY = Math.abs(end[1] - start[1]);
+  const nearby = (cad.sectionSegments || []).filter(([a, b]) => {
+    const x = (a[0] + b[0]) / 2;
+    const y = (a[1] + b[1]) / 2;
+    return Math.abs(x - centerX) <= Math.max(700, spanX * 0.9)
+      && Math.abs(y - centerY) <= Math.max(650, spanY * 2.5);
+  });
+  const verticalItems = [];
+  const horizontalItems = [];
+  nearby.forEach((points) => {
+    const [a, b] = points;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    if (Math.abs(dy) > Math.abs(dx) * 3) {
+      const slope = dx / dy;
+      verticalItems.push({ points, reference: (a[0] + b[0]) / 2 - slope * ((a[1] + b[1]) / 2 - centerY) });
+    } else if (Math.abs(dx) > Math.abs(dy) * 3) {
+      const slope = dy / dx;
+      horizontalItems.push({ points, reference: (a[1] + b[1]) / 2 - slope * ((a[0] + b[0]) / 2 - centerX) });
+    }
+  });
+
+  const verticals = clusterGridLines(verticalItems).map((group) => fitGridLine(group, true));
+  const horizontals = clusterGridLines(horizontalItems).map((group) => fitGridLine(group, false));
+  const leftOf = (value) => verticals
+    .filter((line) => line.reference <= value + 20)
+    .sort((a, b) => Math.abs(a.reference - value) - Math.abs(b.reference - value))[0];
+  const startBoundary = leftOf(start[0]);
+  const endBoundary = leftOf(end[0]);
+  const low = Math.min(start[1], end[1]) - 20;
+  const high = Math.max(start[1], end[1]) + 20;
+  const rowBoundary = horizontals
+    .filter((line) => line.reference >= low && line.reference <= high)
+    .sort((a, b) => Math.min(Math.abs(a.reference - start[1]), Math.abs(a.reference - end[1]))
+      - Math.min(Math.abs(b.reference - start[1]), Math.abs(b.reference - end[1])))[0];
+  if (!startBoundary || !endBoundary || startBoundary === endBoundary || !rowBoundary) return null;
+  const startControl = intersectGridLines(startBoundary, rowBoundary);
+  const endControl = intersectGridLines(endBoundary, rowBoundary);
+  return startControl && endControl ? [startControl, endControl] : null;
 }
 
 function dmsToDecimal(d, m, s, west) {
@@ -396,7 +493,7 @@ function renderDetectedInfo(info, pages) {
   const sectionOnly = info.legal?.startsWith('SEC-')
     && !Number.isFinite(info.lat) && !Number.isFinite(info.lon);
   const note = info.cadBoundary
-    ? 'The proposed corridor is extracted from the PDF CAD layer and approximately anchored between the two legal locations. Confirm the preliminary alignment against the plan and imagery before download.'
+    ? 'The proposed corridor is extracted from the PDF CAD layer and aligned from its CAD section lines to Alberta Township System section corners. Confirm the preliminary alignment against the plan and imagery before download.'
     : info.traverse
     ? 'The pad boundary will be reconstructed from the survey calls and positioned from the legal-land tie. Confirm it against the plan and imagery before download.'
     : sectionOnly
@@ -475,6 +572,40 @@ async function queryAtsLegal(legal) {
   if (!data.features?.length) throw new Error('No matching ATS parcel was found. Check the legal location.');
   return data.features.find((feature) => !/^RA\b/i.test(feature.properties?.DESCRIPTOR || ''))
     || data.features[0];
+}
+
+async function queryAtsSection(legal) {
+  return queryAtsLegal({ ...legal, level: 'section' });
+}
+
+function sectionGridPosition(section) {
+  const rows = [
+    [31, 32, 33, 34, 35, 36],
+    [30, 29, 28, 27, 26, 25],
+    [19, 20, 21, 22, 23, 24],
+    [18, 17, 16, 15, 14, 13],
+    [7, 8, 9, 10, 11, 12],
+    [6, 5, 4, 3, 2, 1],
+  ];
+  for (let row = 0; row < rows.length; row += 1) {
+    const column = rows[row].indexOf(section);
+    if (column >= 0) return { row, column };
+  }
+  return null;
+}
+
+function projectedSectionCorner(geometry, eastSide, northSide) {
+  const lonLat = [];
+  collectCoordinates(geometry.coordinates, lonLat);
+  const points = lonLat.map((point) => window.proj4('EPSG:4326', EPSG3400, point));
+  if (!points.length) throw new Error('An ATS section corner could not be resolved.');
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const target = [eastSide ? Math.max(...xs) : Math.min(...xs), northSide ? Math.max(...ys) : Math.min(...ys)];
+  return points.reduce((closest, point) => (
+    Math.hypot(point[0] - target[0], point[1] - target[1])
+      < Math.hypot(closest[0] - target[0], closest[1] - target[1]) ? point : closest
+  ));
 }
 
 async function querySectionWestMidpoint(legal) {
@@ -565,28 +696,30 @@ async function buildCadBoundaryFromDetected() {
   if (!cad || legalValues.length < 2) return;
 
   try {
-    const legal = legalValues.map(parseLegal);
+    let legal = legalValues.map(parseLegal);
     if (legal.some((value) => !value)) throw new Error('Two valid endpoint legal locations are required.');
-    const [startFeature, endFeature] = await Promise.all(legal.map(queryAtsLegal));
-    const startLonLat = geojsonCenter(startFeature.geometry);
-    const endLonLat = geojsonCenter(endFeature.geometry);
+    const positions = legal.map((value) => sectionGridPosition(value.sec));
+    if (positions.some((value) => !value)
+      || legal[0].twp !== legal[1].twp || legal[0].rge !== legal[1].rge || legal[0].mer !== legal[1].mer) {
+      throw new Error('The ATS section-grid control could not be resolved for these endpoints.');
+    }
+    if (positions[1].column < positions[0].column) {
+      legal = [legal[1], legal[0]];
+      positions.reverse();
+    }
+    if (positions[0].column === positions[1].column || positions[0].row === positions[1].row) {
+      throw new Error('Two crossing ATS section-grid controls are required for this preliminary corridor.');
+    }
 
-    const earthRadius = 6378137;
-    const latitude0 = (startLonLat[1] + endLonLat[1]) / 2 * Math.PI / 180;
-    const toMetres = ([lon, lat]) => [
-      lon * Math.PI / 180 * earthRadius * Math.cos(latitude0),
-      lat * Math.PI / 180 * earthRadius,
-    ];
-    const toLonLat = ([east, north]) => [
-      east / (earthRadius * Math.cos(latitude0)) * 180 / Math.PI,
-      north / earthRadius * 180 / Math.PI,
-    ];
-
-    const startMetres = toMetres(startLonLat);
-    const endMetres = toMetres(endLonLat);
+    const sourceControls = findCadSectionControls(cad);
+    if (!sourceControls) throw new Error('The PDF section lines could not be matched to the corridor.');
+    const [startSection, endSection] = await Promise.all(legal.map(queryAtsSection));
+    const endIsNorth = positions[1].row < positions[0].row;
+    const startMetres = projectedSectionCorner(startSection.geometry, false, endIsNorth);
+    const endMetres = projectedSectionCorner(endSection.geometry, false, !endIsNorth);
     const sourceVector = [
-      cad.endPoint[0] - cad.startPoint[0],
-      cad.endPoint[1] - cad.startPoint[1],
+      sourceControls[1][0] - sourceControls[0][0],
+      sourceControls[1][1] - sourceControls[0][1],
     ];
     const targetVector = [
       endMetres[0] - startMetres[0],
@@ -602,13 +735,13 @@ async function buildCadBoundaryFromDetected() {
     const sin = Math.sin(rotation);
 
     const corners = cad.points.map((point) => {
-      const x = point[0] - cad.startPoint[0];
-      const y = point[1] - cad.startPoint[1];
+      const x = point[0] - sourceControls[0][0];
+      const y = point[1] - sourceControls[0][1];
       const metres = [
         startMetres[0] + scale * (x * cos - y * sin),
         startMetres[1] + scale * (x * sin + y * cos),
       ];
-      const [lon, lat] = toLonLat(metres);
+      const [lon, lat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
       return [lat, lon];
     });
 
@@ -618,7 +751,7 @@ async function buildCadBoundaryFromDetected() {
     const center = layer.getBounds().getCenter();
     $('latInput').value = center.lat.toFixed(7);
     $('lonInput').value = center.lng.toFixed(7);
-    setPdfStatus(`Preliminary corridor polygon extracted from CAD layer P-PROPOSED and anchored from ${legalValues[0]} to ${legalValues[1]}. Verify the orange boundary before confirming.`);
+    setPdfStatus(`Preliminary corridor polygon extracted from CAD layer P-PROPOSED and aligned from the ATS section grid between ${legalValues[0]} and ${legalValues[1]}. Verify the orange boundary before confirming.`);
   } catch (err) {
     console.error('The proposed CAD corridor could not be positioned.', err);
     setPdfStatus(`The proposed CAD layer was found, but it could not be positioned: ${err.message || err}`);

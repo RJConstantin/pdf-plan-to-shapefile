@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation } from './plan-parser.mjs';
+import { detectExplicitDimensions, detectLegalLocation } from './plan-parser.mjs?v=2026.08.20.2';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 

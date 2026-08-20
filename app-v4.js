@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.30';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.30';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.30';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.31';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.31';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.31';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -1207,6 +1207,8 @@ function findCadSectionControls(cad) {
 }
 
 function chooseVerticalControl(lines, bounds, center, eastSide) {
+  if (eastSide === true) return lines.slice().sort((a, b) => b.reference - a.reference)[0];
+  if (eastSide === false) return lines.slice().sort((a, b) => a.reference - b.reference)[0];
   const preferred = eastSide === true
     ? lines.filter((line) => line.reference >= bounds[2])
     : eastSide === false
@@ -1218,6 +1220,8 @@ function chooseVerticalControl(lines, bounds, center, eastSide) {
 }
 
 function chooseHorizontalControl(lines, bounds, center, northSide) {
+  if (northSide === true) return lines.slice().sort((a, b) => a.reference - b.reference)[0];
+  if (northSide === false) return lines.slice().sort((a, b) => b.reference - a.reference)[0];
   const preferred = northSide === true
     ? lines.filter((line) => line.reference <= bounds[1])
     : northSide === false

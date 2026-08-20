@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.10';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.11';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -369,12 +369,6 @@ async function extractCadProposedBoundary(doc) {
     const proposedLayerId = order.find((id) => /^P-PROPOSED$/i.test(config.getGroup(id)?.name || ''));
     const proposedHatchLayerId = order.find((id) => /^P-PROPOSED-H$/i.test(config.getGroup(id)?.name || ''));
     const sectionLayerId = order.find((id) => /^L-USEC$/i.test(config.getGroup(id)?.name || ''));
-    console.info('[CAD debug layers]', JSON.stringify({
-      proposedLayerId,
-      proposedHatchLayerId,
-      sectionLayerId,
-      layerNames: order.map((id) => config.getGroup(id)?.name || '').filter(Boolean),
-    }));
     if (!proposedLayerId && !proposedHatchLayerId) return null;
 
     const candidates = [];
@@ -400,7 +394,7 @@ async function extractCadProposedBoundary(doc) {
           markedContent.push(markedContent.at(-1) || null);
         } else if (name === 'endMarkedContent') {
           markedContent.pop();
-        } else if (name === 'constructPath' && markedContent.at(-1) === proposedLayerId) {
+        } else if (name === 'constructPath' && proposedLayerId && markedContent.at(-1) === proposedLayerId) {
           const points = parseConstructedPath(args, matrix);
           if (points.length >= 6) {
             const xs = points.map((point) => point[0]);
@@ -408,16 +402,15 @@ async function extractCadProposedBoundary(doc) {
             const span = Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
             candidates.push({ page, pageNumber, points, span });
           }
-        } else if (name === 'constructPath' && markedContent.at(-1) === proposedHatchLayerId) {
+        } else if (name === 'constructPath' && proposedHatchLayerId && markedContent.at(-1) === proposedHatchLayerId) {
           const points = parseConstructedPath(args, matrix);
           if (points.length >= 3) hatchPaths.push({ page, pageNumber, points });
-        } else if (name === 'constructPath' && markedContent.at(-1) === sectionLayerId) {
+        } else if (name === 'constructPath' && sectionLayerId && markedContent.at(-1) === sectionLayerId) {
           const points = parseConstructedPath(args, matrix);
           if (points.length === 2) sectionSegments.push({ pageNumber, points });
         }
       }
     }
-    console.info('[CAD debug paths]', JSON.stringify({ candidates: candidates.length, hatchPaths: hatchPaths.length, sectionSegments: sectionSegments.length }));
     if (!candidates.length && !hatchPaths.length) return null;
 
     if (!candidates.length) {

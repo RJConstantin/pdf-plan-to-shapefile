@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.40';
-import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.40';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.40';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.41';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.41';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.41';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -2021,22 +2021,6 @@ async function buildCadHatchBoundaryFromDetected() {
       const secondCorner = projectedSectionCorner(sections[1].geometry, !firstIsWest, control.northSide);
       targetAnchor = [(firstCorner[0] + secondCorner[0]) / 2, (firstCorner[1] + secondCorner[1]) / 2];
       referenceEastSide = firstIsWest;
-    } else if (cad.anchorKind === 'coordinate-access-end' && cad.sourceAnchor) {
-      const targetAnchor = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
-      const metresPerPoint = planScale * 0.0254 / 72;
-      const transformPoint = (point) => {
-        const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
-          point[0] - cad.sourceAnchor[0],
-          point[1] - cad.sourceAnchor[1],
-        ], cad.pageQuarterTurns);
-        const metres = [
-          targetAnchor[0] + drawingX * metresPerPoint,
-          targetAnchor[1] - drawingY * metresPerPoint,
-        ];
-        const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
-        return [pointLat, pointLon];
-      };
-      rings = cad.rings.map((ring) => ring.map(transformPoint));
     } else {
       targetAnchor = projectedSectionCorner(sections[0].geometry, control.eastSide, control.northSide);
     }
@@ -2111,6 +2095,22 @@ async function buildRedSiteBoundaryFromDetected() {
         const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
         return [pointLat, pointLon];
       }));
+    } else if (cad.anchorKind === 'coordinate-access-end' && cad.sourceAnchor) {
+      const targetAnchor = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
+      const metresPerPoint = planScale * 0.0254 / 72;
+      const transformPoint = (point) => {
+        const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
+          point[0] - cad.sourceAnchor[0],
+          point[1] - cad.sourceAnchor[1],
+        ], cad.pageQuarterTurns);
+        const metres = [
+          targetAnchor[0] + drawingX * metresPerPoint,
+          targetAnchor[1] - drawingY * metresPerPoint,
+        ];
+        const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
+        return [pointLat, pointLon];
+      };
+      rings = cad.rings.map((ring) => ring.map(transformPoint));
     } else {
       const targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
       const metresPerPoint = planScale * 0.0254 / 72;

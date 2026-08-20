@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.16';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.16';
+import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.17';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.17';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -64,6 +64,8 @@ async function ensureMap() {
   await loadLibraries();
   const L = window.L;
   state.map = L.map('planMap', { zoomControl: true }).setView(DEFAULT_CENTER, 5);
+  state.map.createPane('boundaryPane');
+  state.map.getPane('boundaryPane').style.zIndex = '460';
 
   const imagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     maxZoom: 20,
@@ -1348,10 +1350,20 @@ async function buildDloBoundaryFromDetected() {
     };
     const rings = cad.rings.map((ring) => ring.map(transformPoint));
     const corners = rings.length === 1 ? rings[0] : rings.map((ring) => [ring]);
-    const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
+    const layer = window.L.polygon(corners, {
+      pane: 'boundaryPane',
+      color: '#ff4f00',
+      weight: 5,
+      opacity: 1,
+      fillColor: '#ff8a00',
+      fillOpacity: 0.48,
+      lineJoin: 'round',
+      className: 'dlo-boundary',
+    });
     replaceBoundary(layer);
+    layer.bringToFront();
     state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 16 });
-    setPdfStatus(`DLO trail boundary reconstructed from ${rings.length} vector corridor parts and positioned from the X1 crossing coordinate in NAD83 UTM Zone 11. Vector area ${cad.hectares.toFixed(3)} ha; plan disposition area ${state.detected.dloPlan.area.toFixed(3)} ha. Verify the orange boundary before confirming.`);
+    setPdfStatus(`DLO trail boundary drawn in bright orange from ${rings.length} vector corridor parts and positioned from the X1 crossing coordinate in NAD83 UTM Zone 11. Vector area ${cad.hectares.toFixed(3)} ha; plan disposition area ${state.detected.dloPlan.area.toFixed(3)} ha. Verify the boundary before confirming.`);
   } catch (err) {
     console.error('The DLO trail boundary could not be positioned.', err);
     setPdfStatus(`The DLO trail vectors were found, but they could not be positioned: ${err.message || err}`);

@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.13';
-import { extractHatchRings } from './cad-geometry.mjs?v=2026.08.20.13';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanScale, detectSectionAnchors } from './plan-parser.mjs?v=2026.08.20.14';
+import { extractHatchRings } from './cad-geometry.mjs?v=2026.08.20.14';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -204,12 +204,12 @@ function detectPlanInfo(text) {
     }
   }
 
-  const legal = detectLegalLocation(text);
+  result.sectionAnchors = detectSectionAnchors(text);
+  result.planScale = detectPlanScale(text);
+  const legal = result.sectionAnchors[0]?.legal || detectLegalLocation(text);
   if (legal) result.legal = legal;
   result.legalLocations = detectLegalLocations(text);
   if (!result.legal && result.legalLocations.length) result.legal = result.legalLocations[0];
-  result.sectionAnchors = detectSectionAnchors(text);
-  result.planScale = detectPlanScale(text);
 
   const dimensions = detectExplicitDimensions(text);
   if (dimensions) {

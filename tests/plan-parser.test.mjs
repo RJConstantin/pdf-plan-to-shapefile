@@ -22,6 +22,17 @@ test('detects an explicit section location', () => {
   assert.equal(detectLegalLocation('SEC-18-79-12-W5M'), 'SEC-18-79-12-W5M');
 });
 
+test('detects a labelled half-section location from an as-built plan', () => {
+  assert.equal(
+    detectLegalLocation('E.1/2 SEC. 12 TWP. 82 RGE. 11 W.5M.'),
+    'SEC-12-82-11-W5M'
+  );
+  assert.equal(
+    detectLegalLocation('As Built E12-82-11-5_Rev0 Prelim.pdf'),
+    'SEC-12-82-11-W5M'
+  );
+});
+
 test('rejects out-of-range legal locations', () => {
   assert.equal(detectLegalLocation('5P-48-79-12-5'), null);
   assert.equal(detectLegalLocation('18-45-79-12-W5M'), null);

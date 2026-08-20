@@ -60,6 +60,32 @@ export function detectLegalLocation(text) {
     }
   }
 
+  const labelledSection = text.match(
+    /\b(?:[NSEW]\s*\.?\s*1\s*\/\s*2\s*)?SEC(?:TION)?\.?\s*(\d{1,2})\s*TWP\.?\s*(\d{1,3})\s*RGE\.?\s*(\d{1,2})\s*W\.?\s*([456])\s*M\.?/i
+  );
+  if (labelledSection) {
+    const section = Number(labelledSection[1]);
+    const township = Number(labelledSection[2]);
+    const range = Number(labelledSection[3]);
+    const meridian = Number(labelledSection[4]);
+    if (validSection(section, township, range, meridian)) {
+      return `SEC-${section}-${township}-${range}-W${meridian}M`;
+    }
+  }
+
+  const compactPartSection = text.match(
+    /\b[NSEW](?:\s*1\s*\/\s*2)?\s*[._-]?\s*(\d{1,2})\s*-\s*(\d{1,3})\s*-\s*(\d{1,2})\s*-\s*W?\s*([456])(?!\d)/i
+  );
+  if (compactPartSection) {
+    const section = Number(compactPartSection[1]);
+    const township = Number(compactPartSection[2]);
+    const range = Number(compactPartSection[3]);
+    const meridian = Number(compactPartSection[4]);
+    if (validSection(section, township, range, meridian)) {
+      return `SEC-${section}-${township}-${range}-W${meridian}M`;
+    }
+  }
+
   return null;
 }
 

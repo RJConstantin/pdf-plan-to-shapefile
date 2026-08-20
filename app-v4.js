@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectDloPlan, detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.33';
-import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.33';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.33';
+import { detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.34';
+import { calibrateRingsByArea, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.34';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.34';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -279,11 +279,14 @@ function candidatePresentation(candidate) {
     };
   }
   if (candidate.kind === 'generic-site-plan' && candidate.sourceKind === 'prominent-vector') {
+    const surveyTie = candidate.anchorKind === 'survey-tie';
     return {
       title: 'Prominent plan boundary',
-      confidence: 'Review carefully',
-      reason: 'Uses the strongest closed plan vector found from its colour, size, closure, and geometry. Confirm its alignment against the PDF.',
-      recommendationRank: 72,
+      confidence: surveyTie ? 'High confidence' : 'Review carefully',
+      reason: surveyTie
+        ? 'Uses the strongest closed plan vector and positions it from the surveyed tie to the ATS section boundary.'
+        : 'Uses the strongest closed plan vector found from its colour, size, closure, and geometry. Confirm its alignment against the PDF.',
+      recommendationRank: surveyTie ? 90 : 72,
     };
   }
   return {
@@ -427,6 +430,7 @@ function detectPlanInfo(text) {
   result.planScale = detectPlanScale(text);
   result.surveyDistances = detectSurveyDistances(text);
   result.planAreas = detectPlanAreas(text);
+  result.legalTie = detectLegacyWellSiteTie(text);
   result.dloPlan = detectDloPlan(text);
   const legal = result.sectionAnchors[0]?.legal || detectLegalLocation(text);
   if (legal) result.legal = legal;
@@ -995,7 +999,8 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
           fillCandidates.push({
             kind: 'generic-site-plan',
             sourceKind: 'survey-fill',
-            anchorKind: Number.isFinite(detected.lat) && Number.isFinite(detected.lon) ? 'coordinate' : 'legal-centre',
+            anchorKind: Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
+              ? 'coordinate' : detected.legalTie ? 'survey-tie' : 'legal-centre',
             pageNumber,
             pageQuarterTurns: detected.pageQuarterTurns?.[pageNumber] || 0,
             planScale,
@@ -1027,7 +1032,8 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
           boundaryCandidates.push({
             kind: 'generic-site-plan',
             sourceKind: 'prominent-vector',
-            anchorKind: Number.isFinite(detected.lat) && Number.isFinite(detected.lon) ? 'coordinate' : 'legal-centre',
+            anchorKind: Number.isFinite(detected.lat) && Number.isFinite(detected.lon)
+              ? 'coordinate' : detected.legalTie ? 'survey-tie' : 'legal-centre',
             pageNumber: group[0].match.pageNumber,
             points: rings.flat(),
             rings,
@@ -1384,6 +1390,7 @@ function renderDetectedInfo(info, pages) {
     found.push(`<strong>ATS anchors:</strong> ${info.sectionAnchors.map((anchor) => `${anchor.part} ${anchor.legal}`).join(' and ')}`);
   }
   if (info.traverse) found.push(`<strong>Survey boundary:</strong> ${info.traverse.segments.length} bearing-and-distance calls`);
+  if (info.legalTie) found.push(`<strong>Survey tie:</strong> ${info.legalTie.distance.toFixed(1)} m bearing-and-distance control to the ATS section boundary`);
   if (info.cadBoundary?.kind === 'corridor') found.push(`<strong>Proposed CAD boundary:</strong> vector layer found between ${escapeHtml(info.legalLocations[0])} and ${escapeHtml(info.legalLocations[1])}`);
   if (info.cadBoundary?.kind === 'site-hatch') found.push('<strong>CAD site boundary:</strong> proposed/as-built hatch boundary and section grid found');
   if (info.cadBoundary?.kind === 'red-site-plan') found.push(`<strong>Sketch boundary:</strong> ${info.cadBoundary.rings.length} area-matched red vector parts found`);
@@ -1412,7 +1419,7 @@ function renderDetectedInfo(info, pages) {
     : info.cadBoundary?.kind === 'red-site-plan'
     ? 'The site and access boundaries are extracted from closed red PDF vectors, checked against the printed hectare values, and positioned from the proposed-site centre coordinate and overview scale. Confirm them against the plan and imagery before download.'
     : info.cadBoundary?.kind === 'generic-site-plan' && info.cadBoundary.sourceKind === 'prominent-vector'
-    ? `The selected outline is the strongest connected plan vector based on its colour, size, closure, and geometry. It is positioned from the ${info.cadBoundary.anchorKind === 'legal-centre' ? 'centre of the detected legal subdivision as an approximate anchor' : 'plan coordinate'} and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.`
+    ? `The selected outline is the strongest connected plan vector based on its colour, size, closure, and geometry. It is positioned from ${info.cadBoundary.anchorKind === 'survey-tie' ? 'the surveyed tie to the ATS section boundary' : info.cadBoundary.anchorKind === 'legal-centre' ? 'the centre of the detected legal subdivision as an approximate anchor' : 'the plan coordinate'} and the overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.`
     : info.cadBoundary?.kind === 'generic-site-plan'
     ? 'The selected outline is extracted from closed PDF vectors, checked against the printed hectare values, and positioned from the plan coordinate and overview scale. Confirm its anchor, alignment, and shape against the PDF and imagery before download.'
     : info.cadBoundary?.kind === 'dlo-hatch' && info.cadBoundary.sourceKind === 'overall-view'
@@ -1432,6 +1439,7 @@ function confidenceLabel(info) {
   if (info.cadBoundary?.kind === 'site-hatch' && info.legal) return 'CAD site boundary and ATS section control found';
   if (info.cadBoundary?.kind === 'red-site-plan') return 'Area-matched sketch vectors and site centre found';
   if (info.cadBoundary?.kind === 'generic-site-plan') {
+    if (info.cadBoundary.anchorKind === 'survey-tie') return 'Plan vectors and surveyed ATS tie found';
     if (info.cadBoundary.anchorKind === 'legal-centre') return 'Plan vectors and approximate legal anchor found';
     return info.cadBoundary.sourceKind === 'prominent-vector'
       ? 'Prominent plan vector and coordinate found'
@@ -1577,6 +1585,113 @@ function collectCoordinates(value, out) {
   if (!Array.isArray(value)) return;
   if (typeof value[0] === 'number' && typeof value[1] === 'number') out.push(value);
   else value.forEach((v) => collectCoordinates(v, out));
+}
+
+function projectedGeometryBounds(geometry) {
+  const lonLat = [];
+  collectCoordinates(geometry?.coordinates, lonLat);
+  const points = lonLat.map((point) => window.proj4('EPSG:4326', EPSG3400, point));
+  if (!points.length) throw new Error('The ATS geometry could not be projected.');
+  return pointBounds(points);
+}
+
+function pointWithinBounds(point, bounds, tolerance = 0) {
+  return point[0] >= bounds[0] - tolerance && point[0] <= bounds[2] + tolerance
+    && point[1] >= bounds[1] - tolerance && point[1] <= bounds[3] + tolerance;
+}
+
+function sectionSurveyAnchors(bounds) {
+  const [minX, minY, maxX, maxY] = bounds;
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+  return [
+    { label: 'west midpoint', point: [minX, midY] },
+    { label: 'east midpoint', point: [maxX, midY] },
+    { label: 'south midpoint', point: [midX, minY] },
+    { label: 'north midpoint', point: [midX, maxY] },
+    { label: 'southwest corner', point: [minX, minY] },
+    { label: 'southeast corner', point: [maxX, minY] },
+    { label: 'northwest corner', point: [minX, maxY] },
+    { label: 'northeast corner', point: [maxX, maxY] },
+  ];
+}
+
+function localPlanOffset(point, origin, quarterTurns, metresPerPoint = 1) {
+  const [x, screenY] = rotateScreenOffsetQuarterTurns([
+    point[0] - origin[0],
+    point[1] - origin[1],
+  ], quarterTurns);
+  return [x * metresPerPoint, -screenY * metresPerPoint];
+}
+
+function surveyTieSourceVertex(ring, quarterTurns, bearing) {
+  const center = polygonCentroid(ring);
+  const radians = bearing * Math.PI / 180;
+  const direction = [Math.sin(radians), Math.cos(radians)];
+  return ring.reduce((best, point) => {
+    const offset = localPlanOffset(point, center, quarterTurns);
+    const score = offset[0] * direction[0] + offset[1] * direction[1];
+    return !best || score > best.score ? { point, score } : best;
+  }, null)?.point;
+}
+
+async function buildSurveyTiedPlanRings(cad, legal, tie, planScale) {
+  if (legal?.level !== 'lsd' || !tie || !(Number.isFinite(planScale) && planScale > 0)) return null;
+  const [section, parcel] = await Promise.all([queryAtsSection(legal), queryAtsLegal(legal)]);
+  const sectionBounds = projectedGeometryBounds(section.geometry);
+  const parcelBounds = projectedGeometryBounds(parcel.geometry);
+  const parcelCenter = [
+    (parcelBounds[0] + parcelBounds[2]) / 2,
+    (parcelBounds[1] + parcelBounds[3]) / 2,
+  ];
+  const rings = cad.rings?.length ? cad.rings : [cad.points];
+  const siteRing = rings.slice().sort((a, b) => polygonArea(b) - polygonArea(a))[0];
+  const metresPerPoint = planScale * 0.0254 / 72;
+  const correctionRadians = -tie.gridCorrection * Math.PI / 180;
+  const cosCorrection = Math.cos(correctionRadians);
+  const sinCorrection = Math.sin(correctionRadians);
+  const candidates = [];
+
+  sectionSurveyAnchors(sectionBounds).forEach((sectionAnchor) => {
+    [0, 180].forEach((reversal) => {
+      const localBearing = (tie.bearing + reversal) % 360;
+      const gridBearing = (localBearing + tie.gridCorrection + 360) % 360;
+      const bearingRadians = gridBearing * Math.PI / 180;
+      const targetSource = [
+        sectionAnchor.point[0] - tie.distance * Math.sin(bearingRadians),
+        sectionAnchor.point[1] - tie.distance * Math.cos(bearingRadians),
+      ];
+      if (!pointWithinBounds(targetSource, parcelBounds, 5)) return;
+      const sourcePoint = surveyTieSourceVertex(siteRing, cad.pageQuarterTurns, localBearing);
+      if (!sourcePoint) return;
+      const transformPoint = (point) => {
+        const [localEast, localNorth] = localPlanOffset(
+          point,
+          sourcePoint,
+          cad.pageQuarterTurns,
+          metresPerPoint,
+        );
+        return [
+          targetSource[0] + localEast * cosCorrection - localNorth * sinCorrection,
+          targetSource[1] + localEast * sinCorrection + localNorth * cosCorrection,
+        ];
+      };
+      const transformedRings = rings.map((ring) => ring.map(transformPoint));
+      const transformedSite = siteRing.map(transformPoint);
+      const siteCenter = polygonCentroid(transformedSite);
+      const insideRatio = transformedSite.filter((point) => pointWithinBounds(point, parcelBounds, 5)).length
+        / transformedSite.length;
+      const centerDistance = Math.hypot(siteCenter[0] - parcelCenter[0], siteCenter[1] - parcelCenter[1]);
+      candidates.push({
+        rings: transformedRings,
+        siteCenter,
+        sectionAnchor: sectionAnchor.label,
+        score: insideRatio * 100 + (pointWithinBounds(siteCenter, parcelBounds, 5) ? 50 : 0)
+          - centerDistance / 10000,
+      });
+    });
+  });
+  return candidates.sort((a, b) => b.score - a.score)[0] || null;
 }
 
 function buildRectangleFromFields() {
@@ -1774,34 +1889,61 @@ async function buildRedSiteBoundaryFromDetected() {
     || !Number.isFinite(lon) || !Number.isFinite(planScale)) return;
 
   try {
-    const targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
-    const metresPerPoint = planScale * 0.0254 / 72;
-    const transformPoint = (point) => {
-      const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
-        point[0] - cad.siteCenter[0],
-        point[1] - cad.siteCenter[1],
-      ], cad.pageQuarterTurns);
-      const metres = [
-        targetCenter[0] + drawingX * metresPerPoint,
-        targetCenter[1] - drawingY * metresPerPoint,
-      ];
-      const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
-      return [pointLat, pointLon];
-    };
-    const rings = cad.rings.map((ring) => ring.map(transformPoint));
+    let surveyTieResult = null;
+    if (cad.anchorKind === 'survey-tie' && state.detected.legalTie) {
+      try {
+        surveyTieResult = await buildSurveyTiedPlanRings(
+          cad,
+          parseLegal(state.detected.legal),
+          state.detected.legalTie,
+          planScale,
+        );
+      } catch (err) {
+        console.warn('The surveyed plan tie could not be resolved; using the legal parcel centre.', err);
+      }
+    }
+
+    let rings;
+    if (surveyTieResult) {
+      rings = surveyTieResult.rings.map((ring) => ring.map((metres) => {
+        const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
+        return [pointLat, pointLon];
+      }));
+    } else {
+      const targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
+      const metresPerPoint = planScale * 0.0254 / 72;
+      const transformPoint = (point) => {
+        const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
+          point[0] - cad.siteCenter[0],
+          point[1] - cad.siteCenter[1],
+        ], cad.pageQuarterTurns);
+        const metres = [
+          targetCenter[0] + drawingX * metresPerPoint,
+          targetCenter[1] - drawingY * metresPerPoint,
+        ];
+        const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
+        return [pointLat, pointLon];
+      };
+      rings = cad.rings.map((ring) => ring.map(transformPoint));
+    }
     const corners = rings.length === 1 ? rings[0] : rings.map((ring) => [ring]);
     const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
     replaceBoundary(layer);
     state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 17 });
+    const center = layer.getBounds().getCenter();
+    $('latInput').value = center.lat.toFixed(7);
+    $('lonInput').value = center.lng.toFixed(7);
     const extractedArea = (cad.hectares || []).reduce((sum, value) => sum + value, 0);
     const partsLabel = rings.length === 1 ? 'site boundary' : `site and access boundaries (${rings.length} parts)`;
     const sourceLabel = cad.sourceKind === 'prominent-vector'
       ? 'Prominent plan vector'
       : cad.sourceKind === 'survey-fill' ? 'Survey fill vector'
       : cad.kind === 'generic-site-plan' ? 'Area-matched vector' : 'Closed red vector';
-    const anchorLabel = cad.anchorKind === 'legal-centre'
-      ? `the centre of ${state.detected.legal} as an approximate anchor`
-      : 'the proposed-site centre coordinate';
+    const anchorLabel = surveyTieResult
+      ? `the ${state.detected.legalTie.distance.toFixed(1)} m survey tie to the ATS section ${surveyTieResult.sectionAnchor}`
+      : cad.anchorKind === 'legal-centre' || cad.anchorKind === 'survey-tie'
+        ? `the centre of ${state.detected.legal} as an approximate anchor`
+        : 'the proposed-site centre coordinate';
     setPdfStatus(`${sourceLabel} ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from ${anchorLabel}. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
   } catch (err) {
     console.error('The red sketch boundary could not be positioned.', err);

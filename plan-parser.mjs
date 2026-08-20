@@ -89,6 +89,50 @@ export function detectSurveyDistances(text) {
   return [...new Set(values)];
 }
 
+function compactSurveyText(text) {
+  return String(text || '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/\s+/g, '');
+}
+
+function signedDms(degrees, minutes = 0, seconds = 0) {
+  const sign = Number(degrees) < 0 ? -1 : 1;
+  return sign * (Math.abs(Number(degrees)) + Number(minutes) / 60 + Number(seconds) / 3600);
+}
+
+export function detectLegacyWellSiteTie(text) {
+  const compact = compactSurveyText(text);
+  if (!/WellSiteDetail/i.test(compact) || !/WellCasing/i.test(compact)) return null;
+
+  const tieMatches = [...compact.matchAll(
+    /(\d{2,4}(?:[.,]\d{1,2})?)\(Tie\)(\d{1,3})[\u00b0\u00ba](\d{1,2})['\u2019](?:(\d{1,2}(?:[.,]\d+)?)['"\u201d]{1,2})?/gi
+  )]
+    .map((match) => ({
+      distance: Number(match[1].replace(',', '.')),
+      bearing: Number(match[2]) + Number(match[3]) / 60
+        + Number((match[4] || '0').replace(',', '.')) / 3600,
+    }))
+    .filter((tie) => tie.distance >= 100 && tie.distance <= 1500
+      && tie.bearing >= 0 && tie.bearing < 360)
+    .sort((a, b) => b.distance - a.distance);
+  if (!tieMatches.length) return null;
+
+  const correctionMatch = compact.match(
+    /ToConvertLocalAstronomicBearingstoUTMGrid:?([+-]?\d{1,2})[\u00b0\u00ba](\d{1,2})['\u2019](\d{1,2}(?:[.,]\d+)?)['"\u201d]{1,2}/i
+  );
+  const gridCorrection = correctionMatch
+    ? signedDms(correctionMatch[1], correctionMatch[2], correctionMatch[3].replace(',', '.'))
+    : 0;
+
+  return {
+    anchor: 'section-boundary',
+    distance: tieMatches[0].distance,
+    bearing: tieMatches[0].bearing,
+    gridCorrection,
+  };
+}
+
 export function detectPlanCoordinates(text) {
   if (!text) return null;
   const source = String(text).replace(/\s+/g, ' ');

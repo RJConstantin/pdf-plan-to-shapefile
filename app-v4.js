@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.7';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.8';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -719,7 +719,7 @@ async function buildCadBoundaryFromDetected() {
     const endMetres = projectedSectionCorner(endSection.geometry, false, !endIsNorth);
     const sourceVector = [
       sourceControls[1][0] - sourceControls[0][0],
-      sourceControls[1][1] - sourceControls[0][1],
+      -(sourceControls[1][1] - sourceControls[0][1]),
     ];
     const targetVector = [
       endMetres[0] - startMetres[0],
@@ -736,7 +736,7 @@ async function buildCadBoundaryFromDetected() {
 
     const corners = cad.points.map((point) => {
       const x = point[0] - sourceControls[0][0];
-      const y = point[1] - sourceControls[0][1];
+      const y = -(point[1] - sourceControls[0][1]);
       const metres = [
         startMetres[0] + scale * (x * cos - y * sin),
         startMetres[1] + scale * (x * sin + y * cos),

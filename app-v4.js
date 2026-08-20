@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.6';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.7';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -560,7 +560,7 @@ async function queryAtsLegal(legal) {
   if (legal.level === 'lsd') clauses.push(`LS=${legal.ls}`);
   const p = new URLSearchParams({
     where: clauses.join(' AND '),
-    outFields: 'M,RGE,TWP,SEC,LS,QS,DESCRIPTOR',
+    outFields: legal.level === 'lsd' ? 'M,RGE,TWP,SEC,LS,QS,DESCRIPTOR' : 'M,RGE,TWP,SEC,DESCRIPTOR',
     returnGeometry: 'true',
     outSR: '4326',
     f: 'geojson',

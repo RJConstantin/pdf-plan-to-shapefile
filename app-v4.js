@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation } from './plan-parser.mjs?v=2026.08.20.2';
+import { detectExplicitDimensions, detectLegalLocation, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.3';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -22,6 +22,7 @@ const state = {
   dispositionRequestId: 0,
   confirmed: false,
   detected: {},
+  locatedFeature: null,
   currentFile: null,
 };
 
@@ -112,6 +113,12 @@ async function handlePdf(file) {
   }
   state.currentFile = file;
   state.confirmed = false;
+  state.locatedFeature = null;
+  if (state.drawn) {
+    state.drawn.clearLayers();
+    state.candidate = null;
+    updateBoundarySummary();
+  }
   $('planPdfName').textContent = file.name;
   setPdfStatus('Reading PDF…');
   $('pdfConfidence').textContent = 'Analyzing plan';
@@ -139,7 +146,9 @@ async function handlePdf(file) {
     $('pdfConfidence').textContent = confidenceLabel(state.detected);
 
     const located = await locateFromFields();
-    if (numberValue('widthInput') && numberValue('heightInput')) {
+    if (state.detected.traverse) {
+      await buildTraverseFromDetected(located);
+    } else if (numberValue('widthInput') && numberValue('heightInput')) {
       buildRectangleFromFields();
     } else if (located && state.detected.legal
       && !Number.isFinite(state.detected.lat) && !Number.isFinite(state.detected.lon)) {
@@ -193,6 +202,9 @@ function detectPlanInfo(text) {
     result.height = dimensions.height;
   }
 
+  const traverse = detectPadTraverse(text);
+  if (traverse) result.traverse = traverse;
+
   return result;
 }
 
@@ -214,6 +226,7 @@ function renderDetectedInfo(info, pages) {
   if (info.legal) found.push(`<strong>Legal location:</strong> ${escapeHtml(info.legal)}`);
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) found.push(`<strong>Coordinate:</strong> ${info.lat.toFixed(6)}, ${info.lon.toFixed(6)}`);
   if (Number.isFinite(info.width) && Number.isFinite(info.height)) found.push(`<strong>Likely dimensions:</strong> ${info.width} m × ${info.height} m`);
+  if (info.traverse) found.push(`<strong>Survey boundary:</strong> ${info.traverse.segments.length} bearing-and-distance calls`);
 
   if (!found.length) {
     $('detectedBox').innerHTML = '<strong>No reliable spatial text was detected.</strong><br>This is common with flattened PDFs. Enter the legal location and dimensions shown on the plan, then verify the result on the map.';
@@ -222,13 +235,16 @@ function renderDetectedInfo(info, pages) {
 
   const sectionOnly = info.legal?.startsWith('SEC-')
     && !Number.isFinite(info.lat) && !Number.isFinite(info.lon);
-  const note = sectionOnly
+  const note = info.traverse
+    ? 'The pad boundary will be reconstructed from the survey calls and positioned from the legal-land tie. Confirm it against the plan and imagery before download.'
+    : sectionOnly
     ? 'This identifies the section only. The PDF page does not provide an exact coordinate anchor, so the site position and boundary must be confirmed manually.'
     : 'These values are a starting point only. Map confirmation is still required.';
   $('detectedBox').innerHTML = `<strong>Detected from PDF (${pages} page${pages === 1 ? '' : 's'}):</strong><br>${found.join('<br>')}<br><span class="detected-note">${note}</span>`;
 }
 
 function confidenceLabel(info) {
+  if (info.traverse && info.legal) return 'Survey traverse and legal tie found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon) && info.legal) return 'Good spatial anchors found';
   if (Number.isFinite(info.lat) && Number.isFinite(info.lon)) return 'Coordinate found';
   if (info.legal) return 'Legal location found';
@@ -264,6 +280,7 @@ async function locateFromFields() {
   try {
     setPdfStatus('Locating the legal land description using the Alberta Township System…');
     const feature = await queryAtsLegal(legal);
+    state.locatedFeature = feature;
     const center = geojsonCenter(feature.geometry);
     $('latInput').value = center[1].toFixed(7);
     $('lonInput').value = center[0].toFixed(7);
@@ -293,7 +310,31 @@ async function queryAtsLegal(legal) {
   if (!res.ok) throw new Error(`ATS service returned ${res.status}.`);
   const data = await res.json();
   if (!data.features?.length) throw new Error('No matching ATS parcel was found. Check the legal location.');
-  return data.features[0];
+  return data.features.find((feature) => !/^RA\b/i.test(feature.properties?.DESCRIPTOR || ''))
+    || data.features[0];
+}
+
+async function querySectionWestMidpoint(legal) {
+  const p = new URLSearchParams({
+    where: `M=${legal.mer} AND RGE=${legal.rge} AND TWP=${legal.twp} AND SEC=${legal.sec}`,
+    outFields: 'M,RGE,TWP,SEC,DESCRIPTOR',
+    returnGeometry: 'true',
+    outSR: '4326',
+    f: 'geojson',
+    resultRecordCount: '20'
+  });
+  const res = await fetch(`${ATS_SERVICE}/15/query?${p}`);
+  if (!res.ok) throw new Error(`ATS service returned ${res.status}.`);
+  const data = await res.json();
+  if (!data.features?.length) throw new Error('The section tie point could not be located.');
+
+  const coords = [];
+  data.features.forEach((feature) => collectCoordinates(feature.geometry?.coordinates, coords));
+  const ys = coords.map((point) => point[1]);
+  const middle = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const closest = Math.min(...coords.map((point) => Math.abs(point[1] - middle)));
+  const candidates = coords.filter((point) => Math.abs(point[1] - middle) <= closest + 1e-7);
+  return candidates.reduce((west, point) => point[0] < west[0] ? point : west);
 }
 
 function geojsonCenter(geometry) {
@@ -353,6 +394,61 @@ function offsetLatLon(lat, lon, eastM, northM) {
   const dLat = northM / r;
   const dLon = eastM / (r * Math.cos(lat * Math.PI / 180));
   return [lat + dLat * 180 / Math.PI, lon + dLon * 180 / Math.PI];
+}
+
+async function buildTraverseFromDetected(located) {
+  const traverse = state.detected.traverse;
+  if (!traverse?.segments?.length) return;
+
+  let origin;
+  let tiedToSurvey = false;
+  try {
+    const legal = parseLegal($('legalInput').value);
+    const sectionPoint = await querySectionWestMidpoint(legal);
+    const tieRadians = traverse.tie.bearing * Math.PI / 180;
+    origin = offsetLatLon(
+      sectionPoint[1],
+      sectionPoint[0],
+      traverse.tie.distance * Math.sin(tieRadians),
+      traverse.tie.distance * Math.cos(tieRadians)
+    );
+    tiedToSurvey = true;
+  } catch (err) {
+    console.warn('Survey tie could not be resolved; centring the traverse on the located parcel.', err);
+  }
+
+  const offsets = [[0, 0]];
+  let east = 0;
+  let north = 0;
+  traverse.segments.forEach((segment) => {
+    const radians = segment.bearing * Math.PI / 180;
+    east += segment.distance * Math.sin(radians);
+    north += segment.distance * Math.cos(radians);
+    offsets.push([east, north]);
+  });
+  if (Math.hypot(east, north) < 1) offsets.pop();
+
+  if (!origin) {
+    const fallback = located || [state.map.getCenter().lat, state.map.getCenter().lng];
+    const eastValues = offsets.map((point) => point[0]);
+    const northValues = offsets.map((point) => point[1]);
+    const centreEast = (Math.min(...eastValues) + Math.max(...eastValues)) / 2;
+    const centreNorth = (Math.min(...northValues) + Math.max(...northValues)) / 2;
+    origin = offsetLatLon(fallback[0], fallback[1], -centreEast, -centreNorth);
+  }
+
+  const corners = offsets.map(([eastOffset, northOffset]) => (
+    offsetLatLon(origin[0], origin[1], eastOffset, northOffset)
+  ));
+  const layer = window.L.polygon(corners, { color: '#c6382f', weight: 3, fillOpacity: 0.2 });
+  replaceBoundary(layer);
+  state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 18 });
+  const center = layer.getBounds().getCenter();
+  $('latInput').value = center.lat.toFixed(7);
+  $('lonInput').value = center.lng.toFixed(7);
+  setPdfStatus(tiedToSurvey
+    ? 'Pad polygon created from the survey bearings, distances, and legal-land tie. Verify the red boundary before confirming.'
+    : 'Pad polygon created from the survey bearings and distances, centred on the located parcel. Move it to the surveyed position before confirming.');
 }
 
 function replaceBoundary(layer) {

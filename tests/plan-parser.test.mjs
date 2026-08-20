@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectExplicitDimensions, detectLegalLocation } from '../plan-parser.mjs';
+import { detectExplicitDimensions, detectLegalLocation, detectPadTraverse } from '../plan-parser.mjs';
 
-test('detects the Clear North pad-coded section location', () => {
+test('detects the Clear North pad-coded LSD location', () => {
   const text = 'CLEAR NORTH GIFT 5P-18-79-12-5 PAGE 5/7';
-  assert.equal(detectLegalLocation(text), 'SEC-18-79-12-W5M');
+  assert.equal(detectLegalLocation(text), '5-18-79-12-W5M');
 });
 
 test('detects a pad-coded location when PDF extraction adds spaces', () => {
   const text = 'CLEAR NORTH GIFT 5P - 18 - 79 - 12 - 5';
-  assert.equal(detectLegalLocation(text), 'SEC-18-79-12-W5M');
+  assert.equal(detectLegalLocation(text), '5-18-79-12-W5M');
 });
 
 test('preserves standard LSD location detection', () => {
@@ -44,4 +44,24 @@ test('detects labelled width and length values', () => {
     width: 125.5,
     height: 180,
   });
+});
+
+test('detects the Clear North closed pad traverse and tie line', () => {
+  const text = `PAD SITE DETAIL
+    106°52'35" 230.00 180.00 196°52'35"
+    241°52'35" 28.28 142.87 286°52'35" 67.13
+    16°52'35" 200.00 140°13'30" 228.15 (Tie Line)`;
+  const traverse = detectPadTraverse(text);
+  assert.equal(traverse.anchor, 'section-west-midpoint');
+  assert.equal(traverse.tie.distance, 228.15);
+  assert.equal(traverse.segments.length, 6);
+
+  let east = 0;
+  let north = 0;
+  for (const segment of traverse.segments) {
+    const radians = segment.bearing * Math.PI / 180;
+    east += segment.distance * Math.sin(radians);
+    north += segment.distance * Math.cos(radians);
+  }
+  assert.ok(Math.hypot(east, north) < 0.01);
 });

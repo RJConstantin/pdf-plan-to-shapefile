@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.4';
+import { detectExplicitDimensions, detectLegalLocation, detectLegalLocations, detectPadTraverse } from './plan-parser.mjs?v=2026.08.20.5';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -235,7 +235,11 @@ function matrixPoint(matrix, point) {
 }
 
 function parseConstructedPath(args, matrix) {
-  const values = Object.values(args?.[1] || {});
+  let pathData = args?.[1];
+  if (Array.isArray(pathData) && pathData.length === 1) [pathData] = pathData;
+  const values = pathData && typeof pathData.length === 'number'
+    ? Array.from(pathData)
+    : Object.values(pathData || {});
   const points = [];
   for (let i = 0; i < values.length;) {
     const command = values[i++];

@@ -170,7 +170,7 @@ export function detectPlanCoordinates(text) {
 export function detectCoordinateRole(text) {
   if (!text) return null;
   const source = String(text).replace(/\s+/g, ' ');
-  if (/\bEXISTING\s+APPROACH\s*(?:&|AND)\s*CULVERT\b[\s\S]{0,260}?\bLAT\.?\b/i.test(source)) {
+  if (/\bEXISTING\s+APPROACH\s*(?:&|AND)\s*CULVERT\b/i.test(source)) {
     return 'access-end';
   }
   return null;

@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.39';
-import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.39';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.39';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.40';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.40';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.40';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -32,6 +32,41 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+let polygonClippingPromise = null;
+
+function loadPolygonClipping() {
+  if (!polygonClippingPromise) {
+    polygonClippingPromise = import('https://cdn.jsdelivr.net/npm/polygon-clipping@0.15.7/+esm')
+      .then((module) => module.default || module)
+      .catch((error) => {
+        console.warn('Polygon union library could not be loaded; using edge-based dissolve.', error);
+        return null;
+      });
+  }
+  return polygonClippingPromise;
+}
+
+function closeRing(ring) {
+  if (!ring?.length) return ring;
+  const first = ring[0];
+  const last = ring.at(-1);
+  return Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6
+    ? ring
+    : [...ring, first];
+}
+
+function unionPlanRings(rings, polygonClipping) {
+  if (!polygonClipping?.union || rings.length < 2) return dissolveRings(rings);
+  try {
+    const result = polygonClipping.union(...rings.map((ring) => [[closeRing(ring)]]));
+    const outerRings = (result || []).map((polygon) => polygon[0]?.slice(0, -1)).filter((ring) => ring?.length >= 3);
+    return outerRings.length ? outerRings : dissolveRings(rings);
+  } catch (error) {
+    console.warn('Survey areas could not be unioned; using edge-based dissolve.', error);
+    return dissolveRings(rings);
+  }
+}
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -1022,6 +1057,7 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
 
     if (!boundaryCandidates.length && !detected.dloPlan
       && Number.isFinite(detected.planAreas?.total) && surveyFillPaths.length) {
+      const polygonClipping = await loadPolygonClipping();
       const fillCandidates = [];
       const pages = [...new Set(surveyFillPaths.map((path) => path.pageNumber))];
       pages.forEach((pageNumber) => {
@@ -1062,7 +1098,7 @@ async function extractCadProposedBoundaries(doc, detected = {}) {
               total += missingOutline.hectares;
             }
           }
-          const dissolved = dissolveRings(groupedRings);
+          const dissolved = unionPlanRings(groupedRings, polygonClipping);
           if (dissolved.length && dissolved.length <= groupedRings.length) {
             groupedRings = dissolved;
             hectares = groupedRings.map((ring) => (

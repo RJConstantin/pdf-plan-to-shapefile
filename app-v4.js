@@ -1,7 +1,8 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.21.45';
-import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.21.45';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.21.45';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.21.46';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.21.46';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.21.46';
+import { LAT_DBF_FIELDS, LAT_DISPOSITIONS, ONESTOP_DBF_FIELDS, createDbf, latActivityLabel, latCodesForDisposition, makeLatName, makeOneStopName, parseOneStopRules, projectedGeometryArea, uniqueSorted } from './submission-rules.mjs?v=2026.08.21.46';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -29,6 +30,8 @@ const state = {
   selectedBoundaryCandidateId: null,
   locatedFeature: null,
   currentFile: null,
+  oneStopRules: [],
+  oneStopRulesPromise: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -159,6 +162,7 @@ async function handlePdf(file) {
   }
   state.currentFile = file;
   state.confirmed = false;
+  updateDownloadControls();
   state.locatedFeature = null;
   state.boundaryCandidates = [];
   state.selectedBoundaryCandidateId = null;
@@ -2316,8 +2320,7 @@ function confirmBoundary() {
   state.confirmed = true;
   $('confirmBoundary').textContent = '✓ Location and boundary confirmed';
   $('confirmBoundary').classList.add('confirmed');
-  $('downloadBoundary').disabled = false;
-  $('downloadTitle').textContent = 'Boundary confirmed. Shapefile download is enabled.';
+  updateDownloadControls();
   $('boundarySummary').innerHTML = '<strong>Confirmed.</strong> Any further geometry edit or location-field change will require confirmation again.';
 }
 
@@ -2325,54 +2328,258 @@ function invalidateConfirmation() {
   state.confirmed = false;
   $('confirmBoundary').textContent = 'Confirm location and boundary';
   $('confirmBoundary').classList.remove('confirmed');
-  $('downloadBoundary').disabled = true;
-  $('downloadTitle').textContent = 'Confirm the boundary to enable download.';
+  updateDownloadControls();
   if (state.candidate || firstBoundaryLayer()) $('confirmBoundary').disabled = false;
 }
 
+function setSelectOptions(id, placeholder, options) {
+  const select = $(id);
+  select.replaceChildren();
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = placeholder;
+  select.appendChild(blank);
+  options.forEach(({ value, label }) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
+  });
+  select.value = '';
+}
+
+async function loadOneStopRules() {
+  if (state.oneStopRules.length) return state.oneStopRules;
+  if (!state.oneStopRulesPromise) {
+    state.oneStopRulesPromise = fetch('./AER_OneStop_PLAR_A2.csv?v=2026.08.21.46', { cache: 'no-store' })
+      .then((response) => {
+        if (!response.ok) throw new Error(`OneStop rule list returned ${response.status}`);
+        return response.text();
+      })
+      .then((text) => {
+        state.oneStopRules = parseOneStopRules(text);
+        if (!state.oneStopRules.length) throw new Error('OneStop rule list is empty');
+        setSelectOptions('oneStopDisposition', 'Select disposition type', uniqueSorted(state.oneStopRules.map((rule) => rule.disposition)).map((value) => ({ value, label: value })));
+        return state.oneStopRules;
+      })
+      .catch((error) => {
+        state.oneStopRulesPromise = null;
+        throw error;
+      });
+  }
+  return state.oneStopRulesPromise;
+}
+
+function populateOneStopPurposes() {
+  const disposition = $('oneStopDisposition').value;
+  const purposes = uniqueSorted(state.oneStopRules.filter((rule) => rule.disposition === disposition).map((rule) => rule.purpose));
+  setSelectOptions('oneStopPurpose', 'Select purpose', purposes.map((value) => ({ value, label: value })));
+  setSelectOptions('oneStopActivity', 'Select activity', []);
+  $('oneStopPurpose').disabled = !disposition || !purposes.length;
+  $('oneStopActivity').disabled = true;
+  updateDownloadControls();
+}
+
+function populateOneStopActivities() {
+  const disposition = $('oneStopDisposition').value;
+  const purpose = $('oneStopPurpose').value;
+  const activities = uniqueSorted(state.oneStopRules.filter((rule) => (
+    rule.disposition === disposition && rule.purpose === purpose
+  )).map((rule) => rule.activity));
+  setSelectOptions('oneStopActivity', 'Select activity', activities.map((value) => ({ value, label: value })));
+  $('oneStopActivity').disabled = !purpose || !activities.length;
+  updateDownloadControls();
+}
+
+function populateLatDispositions() {
+  const options = Object.entries(LAT_DISPOSITIONS)
+    .map(([value, description]) => ({ value, label: `${value} - ${description}` }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  setSelectOptions('latDisposition', 'Select disposition type', options);
+}
+
+function populateLatActivities() {
+  const disposition = $('latDisposition').value;
+  const options = latCodesForDisposition(disposition).map((code) => ({
+    value: code,
+    label: `${latActivityLabel(code)} - ${code}`,
+  }));
+  setSelectOptions('latActivity', 'Select activity code', options);
+  $('latActivity').disabled = !disposition || !options.length;
+  updateDownloadControls();
+}
+
+function selectedOutputIsValid() {
+  const type = $('outputType').value;
+  if (type === 'onestop') {
+    return Boolean($('oneStopDisposition').value && $('oneStopPurpose').value && $('oneStopActivity').value);
+  }
+  if (type === 'lat') {
+    return /^[A-Z0-9]{10}$/.test($('latActivity').value);
+  }
+  return true;
+}
+
+function updateDownloadControls() {
+  const type = $('outputType')?.value || 'standard';
+  const ready = state.confirmed && selectedOutputIsValid();
+  $('downloadBoundary').disabled = !ready;
+  $('oneStopFields').classList.toggle('hidden', type !== 'onestop');
+  $('latFields').classList.toggle('hidden', type !== 'lat');
+
+  const labels = {
+    standard: 'standard shapefile',
+    onestop: 'OneStop / EDPT shapefile',
+    lat: 'LAT shapefile',
+  };
+  const help = {
+    standard: 'The ZIP contains the confirmed polygon in NAD 1983 10TM AEP Forest with general PDF-plan attributes.',
+    onestop: 'Uses the OneStop PLAR Table A2 disposition, purpose, and activity rules, plus the required EDPT fields and naming.',
+    lat: 'Uses the selected official 10-character LAT activity code in the required ACT_TYPE field and LAT package naming.',
+  };
+  $('downloadHelp').textContent = `${help[type]} Review the output before using it in a regulatory workflow.`;
+  $('downloadBoundary').textContent = `Download ${labels[type]}`;
+  if (!state.confirmed) {
+    $('downloadTitle').textContent = 'Confirm the boundary to enable download.';
+  } else if (!selectedOutputIsValid()) {
+    $('downloadTitle').textContent = type === 'onestop'
+      ? 'Select the OneStop disposition, purpose, and activity.'
+      : 'Select the LAT disposition and activity code.';
+  } else {
+    $('downloadTitle').textContent = `Boundary confirmed. ${labels[type][0].toUpperCase()}${labels[type].slice(1)} download is enabled.`;
+  }
+}
+
+async function handleOutputTypeChange() {
+  updateDownloadControls();
+  if ($('outputType').value !== 'onestop' || state.oneStopRules.length) return;
+  $('downloadTitle').textContent = 'Loading OneStop disposition rules…';
+  try {
+    await loadOneStopRules();
+    updateDownloadControls();
+  } catch (error) {
+    console.error(error);
+    $('downloadTitle').textContent = 'The OneStop disposition rules could not be loaded.';
+    $('downloadHelp').textContent = 'Reload the page and try again. Standard and LAT shapefile downloads remain available.';
+  }
+}
+
+function initializeSubmissionControls() {
+  populateLatDispositions();
+  updateDownloadControls();
+}
+
+function findZipEntry(zip, extension) {
+  return Object.values(zip.files).find((entry) => !entry.dir && entry.name.toLowerCase().endsWith(extension));
+}
+
+async function createShapefilePackage(featureCollection, baseName, dbfBytes = null, includeCpg = false) {
+  const generated = window.shpwrite.zip(featureCollection, {
+    folder: baseName,
+    filename: baseName,
+    types: { polygon: baseName },
+    outputType: 'arraybuffer',
+    compression: 'STORE'
+  });
+  const payload = generated instanceof Promise ? await generated : generated;
+  const sourceZip = await window.JSZip.loadAsync(payload);
+  const shpEntry = findZipEntry(sourceZip, '.shp');
+  const shxEntry = findZipEntry(sourceZip, '.shx');
+  const dbfEntry = findZipEntry(sourceZip, '.dbf');
+  if (!shpEntry || !shxEntry || (!dbfEntry && !dbfBytes)) throw new Error('The shapefile library returned an incomplete package');
+
+  const outputZip = new window.JSZip();
+  outputZip.file(`${baseName}.shp`, await shpEntry.async('uint8array'));
+  outputZip.file(`${baseName}.shx`, await shxEntry.async('uint8array'));
+  outputZip.file(`${baseName}.dbf`, dbfBytes || await dbfEntry.async('uint8array'));
+  outputZip.file(`${baseName}.prj`, NAD83_10TM_WKT);
+  if (includeCpg) outputZip.file(`${baseName}.cpg`, 'UTF-8');
+  return outputZip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+}
+
+function triggerDownload(blob, filename) {
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+
 async function downloadBoundary() {
-  if (!state.confirmed) return;
+  if (!state.confirmed || !selectedOutputIsValid()) return;
   const layer = state.candidate || firstBoundaryLayer();
   if (!layer) return;
 
   try {
     const source = layer.toGeoJSON();
     const projectedGeometry = transformGeometry(source.geometry);
+    const outputType = $('outputType').value;
     const legal = $('legalInput').value.trim();
-    const fc = {
+    let properties;
+    let baseName;
+    let downloadName;
+    let dbfBytes = null;
+    let includeCpg = false;
+    let successMessage;
+
+    if (outputType === 'onestop') {
+      const disposition = $('oneStopDisposition').value;
+      const purpose = $('oneStopPurpose').value;
+      const activity = $('oneStopActivity').value;
+      const areaHa = projectedGeometryArea(projectedGeometry) / 10000;
+      properties = {
+        Unique_ID: 1,
+        Disp_Type: disposition,
+        Rel_Unq_ID: 0,
+        Purpose: purpose,
+        Activity: activity,
+        Area_Ha: Number(areaHa.toFixed(3)),
+        Confl_Free: '',
+        Adjoi_Disp: '',
+        Space_Reqm: '',
+        Sur_Pln_ID: '',
+      };
+      baseName = makeOneStopName(disposition);
+      downloadName = `${baseName}.zip`;
+      dbfBytes = createDbf(ONESTOP_DBF_FIELDS, [[
+        '1', disposition, '0', purpose, activity, areaHa.toFixed(3), '', '', '', ''
+      ]]);
+      includeCpg = true;
+      successMessage = 'OneStop / EDPT shapefile created with the required attributes in NAD 1983 10TM AEP Forest.';
+    } else if (outputType === 'lat') {
+      const activityCode = $('latActivity').value;
+      properties = { ACT_TYPE: activityCode };
+      baseName = makeLatName();
+      downloadName = `${baseName}.zip`;
+      dbfBytes = createDbf(LAT_DBF_FIELDS, [[activityCode]]);
+      includeCpg = true;
+      successMessage = 'LAT shapefile created with the selected ACT_TYPE code in NAD 1983 10TM AEP Forest.';
+    } else {
+      properties = {
+        UNIQUE_ID: 'PDFPLAN1',
+        SOURCE: 'PDF_PLAN',
+        CONFIRMED: 'YES',
+        LEGAL_LOC: legal.slice(0, 40)
+      };
+      baseName = 'PDF_Plan_Boundary';
+      downloadName = 'PDF_Plan_Boundary_10TM.zip';
+      successMessage = 'Confirmed boundary shapefile created in NAD 1983 10TM AEP Forest.';
+    }
+
+    const featureCollection = {
       type: 'FeatureCollection',
       features: [{
         type: 'Feature',
         geometry: projectedGeometry,
-        properties: {
-          UNIQUE_ID: 'PDFPLAN1',
-          SOURCE: 'PDF_PLAN',
-          CONFIRMED: 'YES',
-          LEGAL_LOC: legal.slice(0, 40)
-        }
+        properties
       }]
     };
-
-    const result = window.shpwrite.zip(fc, {
-      folder: 'PDF_Plan_Boundary',
-      filename: 'PDF_Plan_Boundary',
-      outputType: 'arraybuffer',
-      compression: 'STORE'
-    });
-    const payload = result instanceof Promise ? await result : result;
-    const zip = await window.JSZip.loadAsync(payload);
-    const prjFiles = Object.keys(zip.files).filter((name) => name.toLowerCase().endsWith('.prj'));
-    prjFiles.forEach((name) => zip.file(name, NAD83_10TM_WKT));
-    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'PDF_Plan_Boundary_10TM.zip';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    setPdfStatus('Confirmed boundary shapefile created in NAD 1983 10TM AEP Forest.');
+    const blob = await createShapefilePackage(featureCollection, baseName, dbfBytes, includeCpg);
+    triggerDownload(blob, downloadName);
+    setPdfStatus(successMessage);
   } catch (err) {
     console.error(err);
     setPdfStatus(`The shapefile could not be created: ${err.message || err}`);
@@ -2656,6 +2863,12 @@ function wireEvents() {
   $('fitBoundary').addEventListener('click', fitBoundary);
   $('confirmBoundary').addEventListener('click', confirmBoundary);
   $('downloadBoundary').addEventListener('click', downloadBoundary);
+  $('outputType').addEventListener('change', handleOutputTypeChange);
+  $('oneStopDisposition').addEventListener('change', populateOneStopPurposes);
+  $('oneStopPurpose').addEventListener('change', populateOneStopActivities);
+  $('oneStopActivity').addEventListener('change', updateDownloadControls);
+  $('latDisposition').addEventListener('change', populateLatActivities);
+  $('latActivity').addEventListener('change', updateDownloadControls);
 
   ['legalInput','latInput','lonInput','widthInput','heightInput','rotationInput'].forEach((id) => {
     $(id).addEventListener('input', invalidateConfirmation);
@@ -2664,6 +2877,7 @@ function wireEvents() {
 
 (async () => {
   wireEvents();
+  initializeSubmissionControls();
   try {
     await ensureMap();
   } catch (err) {

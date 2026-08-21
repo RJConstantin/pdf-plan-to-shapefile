@@ -7,11 +7,11 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>PDF Plan to Shapefile</title>
-  <link rel="stylesheet" href="./style.css?v=2026.08.21.45">
-  <script src="./onestop-jsonp-fix.js?v=2026.08.21.45" defer></script>
-  <script type="module" src="./app-v4.js?v=2026.08.21.45"></script>
-  <script type="module" src="./flattened-plan.js?v=2026.08.21.45"></script>
-  <script type="module" src="./coordinate-formats.js?v=2026.08.21.45"></script>
+  <link rel="stylesheet" href="./style.css?v=2026.08.21.46">
+  <script src="./onestop-jsonp-fix.js?v=2026.08.21.46" defer></script>
+  <script type="module" src="./app-v4.js?v=2026.08.21.46"></script>
+  <script type="module" src="./flattened-plan.js?v=2026.08.21.46"></script>
+  <script type="module" src="./coordinate-formats.js?v=2026.08.21.46"></script>
 </head>
 <body>
   <header class="topbar">
@@ -164,16 +164,57 @@
     </section>
 
     <section class="card download-card">
-      <div>
+      <div class="download-copy">
         <div class="step-label">05 &nbsp; Download</div>
         <h2 id="downloadTitle">Confirm the boundary to enable download.</h2>
-        <p>The downloaded ZIP contains a polygon shapefile for the confirmed boundary in NAD 1983 10TM AEP Forest. Review the output before using it in a regulatory workflow.</p>
+        <p id="downloadHelp">The downloaded ZIP contains a polygon shapefile for the confirmed boundary in NAD 1983 10TM AEP Forest. Review the output before using it in a regulatory workflow.</p>
       </div>
-      <button type="button" class="primary" id="downloadBoundary" disabled>Download confirmed shapefile</button>
+      <div class="download-controls">
+        <label>Shapefile type
+          <select id="outputType">
+            <option value="standard" selected>Standard shapefile</option>
+            <option value="onestop">OneStop / EDPT shapefile</option>
+            <option value="lat">LAT shapefile</option>
+          </select>
+        </label>
+
+        <div class="submission-fields hidden" id="oneStopFields">
+          <label>Disposition type
+            <select id="oneStopDisposition">
+              <option value="">Select disposition type</option>
+            </select>
+          </label>
+          <label>Purpose
+            <select id="oneStopPurpose" disabled>
+              <option value="">Select purpose</option>
+            </select>
+          </label>
+          <label>Activity
+            <select id="oneStopActivity" disabled>
+              <option value="">Select activity</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="submission-fields hidden" id="latFields">
+          <label>Disposition type
+            <select id="latDisposition">
+              <option value="">Select disposition type</option>
+            </select>
+          </label>
+          <label>LAT activity code
+            <select id="latActivity" disabled>
+              <option value="">Select activity code</option>
+            </select>
+          </label>
+        </div>
+
+        <button type="button" class="primary" id="downloadBoundary" disabled>Download confirmed shapefile</button>
+      </div>
     </section>
   </main>
 
   <footer class="site-disclaimer"><strong>Disclaimer:</strong> These browser based GIS tools are intended for preliminary screening, data preparation and general reference. Results depend on the accuracy, completeness, availability and currency of the source data and services. Verify outputs against the applicable authoritative source before using them for regulatory submissions, surveying, field decisions or other professional work.</footer>
-  <div class="site-version" aria-label="Site version">v2026.08.21.45</div>
+  <div class="site-version" aria-label="Site version">v2026.08.21.46</div>
 </body>
 </html>

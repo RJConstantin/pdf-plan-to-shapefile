@@ -138,6 +138,50 @@ export function rankBoundaryCandidates(candidates) {
   ));
 }
 
+export const BOUNDARY_PLACEMENT_METHODS = [
+  { value: 'auto', label: 'Automatic for this PDF' },
+  { value: 'coordinate-centre', label: 'Plan coordinate is boundary centre' },
+  { value: 'coordinate-access-end', label: 'Plan coordinate is access / approach end' },
+  { value: 'survey-tie', label: 'Use surveyed ATS tie' },
+  { value: 'legal-centre', label: 'Use legal parcel centre' },
+];
+
+function isPlanBoundaryCandidate(candidate) {
+  return candidate?.kind === 'red-site-plan' || candidate?.kind === 'generic-site-plan';
+}
+
+export function availableBoundaryPlacements(candidate, detected = {}) {
+  const available = new Set(['auto']);
+  if (!isPlanBoundaryCandidate(candidate)) return available;
+
+  const hasCoordinate = Number.isFinite(detected.lat) && Number.isFinite(detected.lon);
+  if (hasCoordinate) available.add('coordinate-centre');
+  if (hasCoordinate && finitePoint(candidate.sourceAnchor)) available.add('coordinate-access-end');
+  if (detected.legal && detected.legalTie) available.add('survey-tie');
+  if (detected.legal) available.add('legal-centre');
+  return available;
+}
+
+export function automaticBoundaryPlacement(candidate, detected = {}) {
+  const available = availableBoundaryPlacements(candidate, detected);
+  const preferred = candidate?.anchorKind === 'coordinate-access-end'
+    ? 'coordinate-access-end'
+    : candidate?.anchorKind === 'survey-tie'
+      ? 'survey-tie'
+      : candidate?.anchorKind === 'legal-centre'
+        ? 'legal-centre'
+        : 'coordinate-centre';
+  if (available.has(preferred)) return preferred;
+  return ['survey-tie', 'coordinate-centre', 'legal-centre', 'coordinate-access-end']
+    .find((method) => available.has(method)) || 'auto';
+}
+
+export function resolveBoundaryPlacement(selected, candidate, detected = {}) {
+  const available = availableBoundaryPlacements(candidate, detected);
+  if (selected && selected !== 'auto' && available.has(selected)) return selected;
+  return automaticBoundaryPlacement(candidate, detected);
+}
+
 function ringArea(ring) {
   return Math.abs(ring.reduce((sum, point, index) => {
     const next = ring[(index + 1) % ring.length];

@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.20.42';
-import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.20.42';
-import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.20.42';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.21.43';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.21.43';
+import { availableBoundaryPlacements, BOUNDARY_PLACEMENT_METHODS, boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, resolveBoundaryPlacement, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.21.43';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -27,6 +27,8 @@ const state = {
   detected: {},
   boundaryCandidates: [],
   selectedBoundaryCandidateId: null,
+  placementMethod: 'auto',
+  planCoordinate: null,
   locatedFeature: null,
   currentFile: null,
 };
@@ -162,6 +164,9 @@ async function handlePdf(file) {
   state.locatedFeature = null;
   state.boundaryCandidates = [];
   state.selectedBoundaryCandidateId = null;
+  state.placementMethod = 'auto';
+  state.planCoordinate = null;
+  updatePlacementOptions(null);
   hideBoundaryCandidates();
   if (state.drawn) {
     state.drawn.clearLayers();
@@ -195,6 +200,9 @@ async function handlePdf(file) {
 
     state.pdfText = text.replace(/\s+/g, ' ').trim();
     state.detected = detectPlanInfo(`${file.name} ${state.pdfText}`);
+    state.planCoordinate = validLatLon(state.detected.lat, state.detected.lon)
+      ? [state.detected.lat, state.detected.lon]
+      : null;
     state.detected.pageQuarterTurns = pageQuarterTurns;
     state.detected.pageScales = pageScales;
     const extractedCandidates = await extractCadProposedBoundaries(doc, state.detected);
@@ -405,6 +413,72 @@ function renderBoundaryCandidates() {
   }).join('');
 }
 
+const PLACEMENT_DESCRIPTIONS = {
+  auto: 'The tool will use the placement method recommended for this PDF.',
+  'coordinate-centre': 'The latitude and longitude are treated as the centre of the extracted boundary.',
+  'coordinate-access-end': 'The latitude and longitude are attached to the extracted access or approach endpoint.',
+  'survey-tie': 'The boundary is positioned from the surveyed bearing-and-distance tie to the Alberta Township System.',
+  'legal-centre': 'The extracted boundary is centred on the detected Alberta legal parcel as an approximate placement.',
+};
+
+function placementDetectionInfo() {
+  return {
+    ...state.detected,
+    lat: state.planCoordinate?.[0],
+    lon: state.planCoordinate?.[1],
+  };
+}
+
+function updatePlacementOptions(candidate = state.detected.cadBoundary) {
+  const select = $('placementMethod');
+  const help = $('placementHelp');
+  if (!select) return;
+
+  const placementInfo = placementDetectionInfo();
+  const available = availableBoundaryPlacements(candidate, placementInfo);
+  const adjustable = available.size > 1;
+  select.disabled = !adjustable;
+  BOUNDARY_PLACEMENT_METHODS.forEach(({ value, label }) => {
+    const option = [...select.options].find((item) => item.value === value);
+    if (!option) return;
+    option.disabled = value !== 'auto' && !available.has(value);
+    option.textContent = label;
+  });
+
+  if (!available.has(state.placementMethod)) state.placementMethod = 'auto';
+  select.value = state.placementMethod;
+  const resolved = resolveBoundaryPlacement(state.placementMethod, candidate, placementInfo);
+  const resolvedLabel = BOUNDARY_PLACEMENT_METHODS.find(({ value }) => value === resolved)?.label || 'the available method';
+  if (help) {
+    help.textContent = adjustable
+      ? state.placementMethod === 'auto'
+        ? `Automatic will use “${resolvedLabel}”. Choose another method if the polygon is in the wrong location.`
+        : PLACEMENT_DESCRIPTIONS[state.placementMethod]
+      : 'This PDF has one supported placement method. The extracted polygon can still be edited directly on the map.';
+  }
+}
+
+async function changeBoundaryPlacement() {
+  const candidate = state.detected.cadBoundary;
+  if (!candidate) return;
+  state.placementMethod = $('placementMethod').value;
+
+  const fieldLat = numberValue('latInput');
+  const fieldLon = numberValue('lonInput');
+  if (validLatLon(fieldLat, fieldLon)) {
+    state.detected.lat = fieldLat;
+    state.detected.lon = fieldLon;
+    state.planCoordinate = [fieldLat, fieldLon];
+  }
+  const fieldLegal = $('legalInput').value.trim();
+  if (fieldLegal) state.detected.legal = fieldLegal;
+
+  updatePlacementOptions(candidate);
+  invalidateConfirmation();
+  setPdfStatus('Repositioning the extracted boundary with the selected method…');
+  await buildRedSiteBoundaryFromDetected();
+}
+
 async function selectBoundaryCandidate(candidateId) {
   const candidate = state.boundaryCandidates.find((item) => item.id === candidateId);
   if (!candidate) return;
@@ -418,6 +492,7 @@ async function selectBoundaryCandidate(candidateId) {
   if (fieldLegal) state.detected.legal = fieldLegal;
   state.selectedBoundaryCandidateId = candidate.id;
   state.detected.cadBoundary = candidate;
+  updatePlacementOptions(candidate);
   state.confirmed = false;
   if (state.drawn) {
     state.drawn.clearLayers();
@@ -432,6 +507,7 @@ async function selectBoundaryCandidate(candidateId) {
   if (located) {
     [state.detected.lat, state.detected.lon] = located;
   }
+  updatePlacementOptions(candidate);
   if (candidate.kind === 'corridor') await buildCadBoundaryFromDetected();
   else if (candidate.kind === 'site-hatch') await buildCadHatchBoundaryFromDetected();
   else if (candidate.kind === 'red-site-plan' || candidate.kind === 'generic-site-plan') await buildRedSiteBoundaryFromDetected();
@@ -2072,15 +2148,18 @@ async function buildCadHatchBoundaryFromDetected() {
 
 async function buildRedSiteBoundaryFromDetected() {
   const cad = state.detected.cadBoundary;
-  const lat = state.detected.lat;
-  const lon = state.detected.lon;
   const planScale = cad?.planScale || state.detected.planScale;
-  if (!cad?.siteCenter || !cad.rings?.length || !Number.isFinite(lat)
-    || !Number.isFinite(lon) || !Number.isFinite(planScale)) return;
+  if (!cad?.siteCenter || !cad.rings?.length || !Number.isFinite(planScale)) return;
 
   try {
+    const placementInfo = placementDetectionInfo();
+    let placementMethod = resolveBoundaryPlacement(state.placementMethod, cad, placementInfo);
+    const lat = placementInfo.lat;
+    const lon = placementInfo.lon;
     let surveyTieResult = null;
-    if (cad.anchorKind === 'survey-tie' && state.detected.legalTie) {
+    let targetCenter = null;
+
+    if (placementMethod === 'survey-tie') {
       try {
         surveyTieResult = await buildSurveyTiedPlanRings(
           cad,
@@ -2088,9 +2167,25 @@ async function buildRedSiteBoundaryFromDetected() {
           state.detected.legalTie,
           planScale,
         );
-      } catch (err) {
-        console.warn('The surveyed plan tie could not be resolved; using the legal parcel centre.', err);
+      } catch (error) {
+        if (state.placementMethod !== 'auto') throw error;
+        console.warn('The automatic surveyed tie could not be resolved; using the legal parcel centre.', error);
       }
+      if (!surveyTieResult) {
+        if (state.placementMethod !== 'auto') throw new Error('The surveyed ATS tie could not be resolved for this plan. Choose another boundary placement method.');
+        placementMethod = 'legal-centre';
+      }
+    }
+
+    if (placementMethod === 'legal-centre') {
+      const legal = parseLegal(state.detected.legal);
+      if (!legal) throw new Error('Enter a valid Alberta legal location before using the legal parcel centre.');
+      const parcel = await queryAtsLegal(legal);
+      const parcelCenter = geojsonCenter(parcel.geometry);
+      targetCenter = window.proj4('EPSG:4326', EPSG3400, parcelCenter);
+    } else if (placementMethod !== 'survey-tie') {
+      if (!validLatLon(lat, lon)) throw new Error('Enter a valid latitude and longitude for coordinate placement.');
+      targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
     }
 
     let rings;
@@ -2099,8 +2194,8 @@ async function buildRedSiteBoundaryFromDetected() {
         const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
         return [pointLat, pointLon];
       }));
-    } else if (cad.anchorKind === 'coordinate-access-end' && cad.sourceAnchor) {
-      const targetAnchor = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
+    } else if (placementMethod === 'coordinate-access-end') {
+      if (!cad.sourceAnchor) throw new Error('This PDF does not contain a usable access or approach endpoint.');
       const metresPerPoint = planScale * 0.0254 / 72;
       const transformPoint = (point) => {
         const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
@@ -2108,15 +2203,14 @@ async function buildRedSiteBoundaryFromDetected() {
           point[1] - cad.sourceAnchor[1],
         ], cad.pageQuarterTurns);
         const metres = [
-          targetAnchor[0] + drawingX * metresPerPoint,
-          targetAnchor[1] - drawingY * metresPerPoint,
+          targetCenter[0] + drawingX * metresPerPoint,
+          targetCenter[1] - drawingY * metresPerPoint,
         ];
         const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
         return [pointLat, pointLon];
       };
       rings = cad.rings.map((ring) => ring.map(transformPoint));
     } else {
-      const targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
       const metresPerPoint = planScale * 0.0254 / 72;
       const transformPoint = (point) => {
         const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
@@ -2136,9 +2230,6 @@ async function buildRedSiteBoundaryFromDetected() {
     const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
     replaceBoundary(layer);
     state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 17 });
-    const center = layer.getBounds().getCenter();
-    $('latInput').value = center.lat.toFixed(7);
-    $('lonInput').value = center.lng.toFixed(7);
     const extractedArea = (cad.hectares || []).reduce((sum, value) => sum + value, 0);
     const partsLabel = rings.length === 1 ? 'site boundary' : `site and access boundaries (${rings.length} parts)`;
     const sourceLabel = cad.sourceKind === 'prominent-vector'
@@ -2147,9 +2238,9 @@ async function buildRedSiteBoundaryFromDetected() {
       : cad.kind === 'generic-site-plan' ? 'Area-matched vector' : 'Closed red vector';
     const anchorLabel = surveyTieResult
       ? `the ${state.detected.legalTie.distance.toFixed(1)} m survey tie to the ATS section ${surveyTieResult.sectionAnchor}${surveyTieResult.eastingControl ? ` and the drawn N-S quarter line matched to the parcel ${surveyTieResult.eastingControl}` : ''}`
-      : cad.anchorKind === 'legal-centre' || cad.anchorKind === 'survey-tie'
+      : placementMethod === 'legal-centre'
         ? `the centre of ${state.detected.legal} as an approximate anchor`
-        : cad.anchorKind === 'coordinate-access-end'
+        : placementMethod === 'coordinate-access-end'
           ? 'the surveyed existing approach and culvert coordinate'
         : 'the proposed-site centre coordinate';
     setPdfStatus(`${sourceLabel} ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from ${anchorLabel}. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
@@ -2537,6 +2628,18 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (ch) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
 }
 
+function rememberPlanCoordinateFromFields() {
+  const lat = numberValue('latInput');
+  const lon = numberValue('lonInput');
+  state.planCoordinate = validLatLon(lat, lon) ? [lat, lon] : null;
+  updatePlacementOptions();
+}
+
+function rememberLegalFromField() {
+  state.detected.legal = $('legalInput').value.trim();
+  updatePlacementOptions();
+}
+
 function wireEvents() {
   $('planPdfInput').addEventListener('change', (e) => handlePdf(e.target.files?.[0]));
   const drop = $('planPdfDrop');
@@ -2559,12 +2662,16 @@ function wireEvents() {
   $('toggleAts').addEventListener('click', toggleAts);
   $('toggleDispositions')?.addEventListener('click', toggleDispositions);
   $('fitBoundary').addEventListener('click', fitBoundary);
+  $('placementMethod')?.addEventListener('change', changeBoundaryPlacement);
   $('confirmBoundary').addEventListener('click', confirmBoundary);
   $('downloadBoundary').addEventListener('click', downloadBoundary);
 
   ['legalInput','latInput','lonInput','widthInput','heightInput','rotationInput'].forEach((id) => {
     $(id).addEventListener('input', invalidateConfirmation);
   });
+  $('latInput').addEventListener('input', rememberPlanCoordinateFromFields);
+  $('lonInput').addEventListener('input', rememberPlanCoordinateFromFields);
+  $('legalInput').addEventListener('input', rememberLegalFromField);
 }
 
 (async () => {

@@ -468,7 +468,6 @@ async function changeBoundaryPlacement() {
   if (validLatLon(fieldLat, fieldLon)) {
     state.detected.lat = fieldLat;
     state.detected.lon = fieldLon;
-    state.planCoordinate = [fieldLat, fieldLon];
   }
   const fieldLegal = $('legalInput').value.trim();
   if (fieldLegal) state.detected.legal = fieldLegal;

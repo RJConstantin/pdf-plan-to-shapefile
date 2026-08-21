@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.21.44';
-import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.21.44';
-import { availableBoundaryPlacements, BOUNDARY_PLACEMENT_METHODS, boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, resolveBoundaryPlacement, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.21.44';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.21.45';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.21.45';
+import { boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.21.45';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
@@ -27,8 +27,6 @@ const state = {
   detected: {},
   boundaryCandidates: [],
   selectedBoundaryCandidateId: null,
-  placementMethod: 'auto',
-  planCoordinate: null,
   locatedFeature: null,
   currentFile: null,
 };
@@ -164,9 +162,6 @@ async function handlePdf(file) {
   state.locatedFeature = null;
   state.boundaryCandidates = [];
   state.selectedBoundaryCandidateId = null;
-  state.placementMethod = 'auto';
-  state.planCoordinate = null;
-  updatePlacementOptions(null);
   hideBoundaryCandidates();
   if (state.drawn) {
     state.drawn.clearLayers();
@@ -200,9 +195,6 @@ async function handlePdf(file) {
 
     state.pdfText = text.replace(/\s+/g, ' ').trim();
     state.detected = detectPlanInfo(`${file.name} ${state.pdfText}`);
-    state.planCoordinate = validLatLon(state.detected.lat, state.detected.lon)
-      ? [state.detected.lat, state.detected.lon]
-      : null;
     state.detected.pageQuarterTurns = pageQuarterTurns;
     state.detected.pageScales = pageScales;
     const extractedCandidates = await extractCadProposedBoundaries(doc, state.detected);
@@ -413,71 +405,6 @@ function renderBoundaryCandidates() {
   }).join('');
 }
 
-const PLACEMENT_DESCRIPTIONS = {
-  auto: 'The tool will use the placement method recommended for this PDF.',
-  'coordinate-centre': 'The latitude and longitude are treated as the centre of the extracted boundary.',
-  'coordinate-access-end': 'The latitude and longitude are attached to the extracted access or approach endpoint.',
-  'survey-tie': 'The boundary is positioned from the surveyed bearing-and-distance tie to the Alberta Township System.',
-  'legal-centre': 'The extracted boundary is centred on the detected Alberta legal parcel as an approximate placement.',
-};
-
-function placementDetectionInfo() {
-  return {
-    ...state.detected,
-    lat: state.planCoordinate?.[0],
-    lon: state.planCoordinate?.[1],
-  };
-}
-
-function updatePlacementOptions(candidate = state.detected.cadBoundary) {
-  const select = $('placementMethod');
-  const help = $('placementHelp');
-  if (!select) return;
-
-  const placementInfo = placementDetectionInfo();
-  const available = availableBoundaryPlacements(candidate, placementInfo);
-  const adjustable = available.size > 1;
-  select.disabled = !adjustable;
-  BOUNDARY_PLACEMENT_METHODS.forEach(({ value, label }) => {
-    const option = [...select.options].find((item) => item.value === value);
-    if (!option) return;
-    option.disabled = value !== 'auto' && !available.has(value);
-    option.textContent = label;
-  });
-
-  if (!available.has(state.placementMethod)) state.placementMethod = 'auto';
-  select.value = state.placementMethod;
-  const resolved = resolveBoundaryPlacement(state.placementMethod, candidate, placementInfo);
-  const resolvedLabel = BOUNDARY_PLACEMENT_METHODS.find(({ value }) => value === resolved)?.label || 'the available method';
-  if (help) {
-    help.textContent = adjustable
-      ? state.placementMethod === 'auto'
-        ? `Automatic will use “${resolvedLabel}”. Choose another method if the polygon is in the wrong location.`
-        : PLACEMENT_DESCRIPTIONS[state.placementMethod]
-      : 'This PDF has one supported placement method. The extracted polygon can still be edited directly on the map.';
-  }
-}
-
-async function changeBoundaryPlacement() {
-  const candidate = state.detected.cadBoundary;
-  if (!candidate) return;
-  state.placementMethod = $('placementMethod').value;
-
-  const fieldLat = numberValue('latInput');
-  const fieldLon = numberValue('lonInput');
-  if (validLatLon(fieldLat, fieldLon)) {
-    state.detected.lat = fieldLat;
-    state.detected.lon = fieldLon;
-  }
-  const fieldLegal = $('legalInput').value.trim();
-  if (fieldLegal) state.detected.legal = fieldLegal;
-
-  updatePlacementOptions(candidate);
-  invalidateConfirmation();
-  setPdfStatus('Repositioning the extracted boundary with the selected method…');
-  await buildRedSiteBoundaryFromDetected();
-}
-
 async function selectBoundaryCandidate(candidateId) {
   const candidate = state.boundaryCandidates.find((item) => item.id === candidateId);
   if (!candidate) return;
@@ -491,7 +418,6 @@ async function selectBoundaryCandidate(candidateId) {
   if (fieldLegal) state.detected.legal = fieldLegal;
   state.selectedBoundaryCandidateId = candidate.id;
   state.detected.cadBoundary = candidate;
-  updatePlacementOptions(candidate);
   state.confirmed = false;
   if (state.drawn) {
     state.drawn.clearLayers();
@@ -506,7 +432,6 @@ async function selectBoundaryCandidate(candidateId) {
   if (located) {
     [state.detected.lat, state.detected.lon] = located;
   }
-  updatePlacementOptions(candidate);
   if (candidate.kind === 'corridor') await buildCadBoundaryFromDetected();
   else if (candidate.kind === 'site-hatch') await buildCadHatchBoundaryFromDetected();
   else if (candidate.kind === 'red-site-plan' || candidate.kind === 'generic-site-plan') await buildRedSiteBoundaryFromDetected();
@@ -2147,18 +2072,15 @@ async function buildCadHatchBoundaryFromDetected() {
 
 async function buildRedSiteBoundaryFromDetected() {
   const cad = state.detected.cadBoundary;
+  const lat = state.detected.lat;
+  const lon = state.detected.lon;
   const planScale = cad?.planScale || state.detected.planScale;
-  if (!cad?.siteCenter || !cad.rings?.length || !Number.isFinite(planScale)) return;
+  if (!cad?.siteCenter || !cad.rings?.length || !Number.isFinite(lat)
+    || !Number.isFinite(lon) || !Number.isFinite(planScale)) return;
 
   try {
-    const placementInfo = placementDetectionInfo();
-    let placementMethod = resolveBoundaryPlacement(state.placementMethod, cad, placementInfo);
-    const lat = placementInfo.lat;
-    const lon = placementInfo.lon;
     let surveyTieResult = null;
-    let targetCenter = null;
-
-    if (placementMethod === 'survey-tie') {
+    if (cad.anchorKind === 'survey-tie' && state.detected.legalTie) {
       try {
         surveyTieResult = await buildSurveyTiedPlanRings(
           cad,
@@ -2166,25 +2088,9 @@ async function buildRedSiteBoundaryFromDetected() {
           state.detected.legalTie,
           planScale,
         );
-      } catch (error) {
-        if (state.placementMethod !== 'auto') throw error;
-        console.warn('The automatic surveyed tie could not be resolved; using the legal parcel centre.', error);
+      } catch (err) {
+        console.warn('The surveyed plan tie could not be resolved; using the legal parcel centre.', err);
       }
-      if (!surveyTieResult) {
-        if (state.placementMethod !== 'auto') throw new Error('The surveyed ATS tie could not be resolved for this plan. Choose another boundary placement method.');
-        placementMethod = 'legal-centre';
-      }
-    }
-
-    if (placementMethod === 'legal-centre') {
-      const legal = parseLegal(state.detected.legal);
-      if (!legal) throw new Error('Enter a valid Alberta legal location before using the legal parcel centre.');
-      const parcel = await queryAtsLegal(legal);
-      const parcelCenter = geojsonCenter(parcel.geometry);
-      targetCenter = window.proj4('EPSG:4326', EPSG3400, parcelCenter);
-    } else if (placementMethod !== 'survey-tie') {
-      if (!validLatLon(lat, lon)) throw new Error('Enter a valid latitude and longitude for coordinate placement.');
-      targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
     }
 
     let rings;
@@ -2193,8 +2099,8 @@ async function buildRedSiteBoundaryFromDetected() {
         const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
         return [pointLat, pointLon];
       }));
-    } else if (placementMethod === 'coordinate-access-end') {
-      if (!cad.sourceAnchor) throw new Error('This PDF does not contain a usable access or approach endpoint.');
+    } else if (cad.anchorKind === 'coordinate-access-end' && cad.sourceAnchor) {
+      const targetAnchor = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
       const metresPerPoint = planScale * 0.0254 / 72;
       const transformPoint = (point) => {
         const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
@@ -2202,14 +2108,15 @@ async function buildRedSiteBoundaryFromDetected() {
           point[1] - cad.sourceAnchor[1],
         ], cad.pageQuarterTurns);
         const metres = [
-          targetCenter[0] + drawingX * metresPerPoint,
-          targetCenter[1] - drawingY * metresPerPoint,
+          targetAnchor[0] + drawingX * metresPerPoint,
+          targetAnchor[1] - drawingY * metresPerPoint,
         ];
         const [pointLon, pointLat] = window.proj4(EPSG3400, 'EPSG:4326', metres);
         return [pointLat, pointLon];
       };
       rings = cad.rings.map((ring) => ring.map(transformPoint));
     } else {
+      const targetCenter = window.proj4('EPSG:4326', EPSG3400, [lon, lat]);
       const metresPerPoint = planScale * 0.0254 / 72;
       const transformPoint = (point) => {
         const [drawingX, drawingY] = rotateScreenOffsetQuarterTurns([
@@ -2229,6 +2136,9 @@ async function buildRedSiteBoundaryFromDetected() {
     const layer = window.L.polygon(corners, { color: '#d85817', weight: 3, fillOpacity: 0.22 });
     replaceBoundary(layer);
     state.map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 17 });
+    const center = layer.getBounds().getCenter();
+    $('latInput').value = center.lat.toFixed(7);
+    $('lonInput').value = center.lng.toFixed(7);
     const extractedArea = (cad.hectares || []).reduce((sum, value) => sum + value, 0);
     const partsLabel = rings.length === 1 ? 'site boundary' : `site and access boundaries (${rings.length} parts)`;
     const sourceLabel = cad.sourceKind === 'prominent-vector'
@@ -2237,9 +2147,9 @@ async function buildRedSiteBoundaryFromDetected() {
       : cad.kind === 'generic-site-plan' ? 'Area-matched vector' : 'Closed red vector';
     const anchorLabel = surveyTieResult
       ? `the ${state.detected.legalTie.distance.toFixed(1)} m survey tie to the ATS section ${surveyTieResult.sectionAnchor}${surveyTieResult.eastingControl ? ` and the drawn N-S quarter line matched to the parcel ${surveyTieResult.eastingControl}` : ''}`
-      : placementMethod === 'legal-centre'
+      : cad.anchorKind === 'legal-centre' || cad.anchorKind === 'survey-tie'
         ? `the centre of ${state.detected.legal} as an approximate anchor`
-        : placementMethod === 'coordinate-access-end'
+        : cad.anchorKind === 'coordinate-access-end'
           ? 'the surveyed existing approach and culvert coordinate'
         : 'the proposed-site centre coordinate';
     setPdfStatus(`${sourceLabel} ${partsLabel} extracted at plan scale 1:${planScale.toLocaleString()} and positioned from ${anchorLabel}. Vector area ${extractedArea.toFixed(3)} ha. Verify the orange boundary before confirming.`);
@@ -2360,10 +2270,12 @@ function firstBoundaryLayer() {
 function updateBoundarySummary() {
   const layer = state.candidate || firstBoundaryLayer();
   if (!layer) {
+    setBoundaryAdjustAvailable(false);
     $('boundarySummary').textContent = 'No boundary has been created yet.';
     $('confirmBoundary').disabled = true;
     return;
   }
+  setBoundaryAdjustAvailable(true);
   const gj = layer.toGeoJSON();
   const area = geometryAreaApprox(gj.geometry);
   const hectares = area ? area / 10000 : null;
@@ -2610,6 +2522,92 @@ function fitBoundary() {
   if (layer && state.map) state.map.fitBounds(layer.getBounds(), { padding: [50, 50], maxZoom: 18 });
 }
 
+function setBoundaryAdjustAvailable(available) {
+  const button = $('toggleBoundaryAdjust');
+  const panel = $('boundaryAdjustPanel');
+  if (!button || !panel) return;
+  button.disabled = !available;
+  if (!available) {
+    panel.classList.add('hidden');
+    button.setAttribute('aria-expanded', 'false');
+    button.textContent = 'Adjust boundary ▾';
+  }
+}
+
+function toggleBoundaryAdjust() {
+  const button = $('toggleBoundaryAdjust');
+  const panel = $('boundaryAdjustPanel');
+  if (!button || !panel || button.disabled) return;
+  const opening = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !opening);
+  button.setAttribute('aria-expanded', String(opening));
+  button.textContent = `Adjust boundary ${opening ? '▴' : '▾'}`;
+}
+
+function mapBoundaryLatLngs(value, transform) {
+  if (Array.isArray(value)) return value.map((item) => mapBoundaryLatLngs(item, transform));
+  if (Number.isFinite(value?.lat) && Number.isFinite(value?.lng)) return transform(value);
+  return value;
+}
+
+function transformBoundary(transform, statusText) {
+  const layer = state.candidate || firstBoundaryLayer();
+  if (!layer?.getLatLngs || !layer?.setLatLngs || !window.proj4) {
+    setPdfStatus('Create a boundary before using the manual adjustment controls.');
+    return;
+  }
+  const adjusted = mapBoundaryLatLngs(layer.getLatLngs(), transform);
+  layer.setLatLngs(adjusted);
+  layer.redraw?.();
+  layer.bringToFront?.();
+  state.candidate = layer;
+  const center = layer.getBounds().getCenter();
+  $('latInput').value = center.lat.toFixed(7);
+  $('lonInput').value = center.lng.toFixed(7);
+  invalidateConfirmation();
+  updateBoundarySummary();
+  setPdfStatus(statusText);
+}
+
+function moveBoundary(direction) {
+  const step = Number($('boundaryMoveStep')?.value) || 10;
+  const offsets = {
+    north: [0, step],
+    south: [0, -step],
+    east: [step, 0],
+    west: [-step, 0],
+  };
+  const [east, north] = offsets[direction] || [0, 0];
+  transformBoundary((point) => {
+    const [x, y] = window.proj4('EPSG:4326', EPSG3400, [point.lng, point.lat]);
+    const [lon, lat] = window.proj4(EPSG3400, 'EPSG:4326', [x + east, y + north]);
+    return window.L.latLng(lat, lon);
+  }, `Moved the whole boundary ${step} m ${direction}. Verify it against the imagery before confirming.`);
+}
+
+function rotateBoundary(deltaDegrees) {
+  const layer = state.candidate || firstBoundaryLayer();
+  if (!layer?.getBounds) {
+    setPdfStatus('Create a boundary before using the manual adjustment controls.');
+    return;
+  }
+  const center = layer.getBounds().getCenter();
+  const [centerX, centerY] = window.proj4('EPSG:4326', EPSG3400, [center.lng, center.lat]);
+  const radians = -deltaDegrees * Math.PI / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  transformBoundary((point) => {
+    const [x, y] = window.proj4('EPSG:4326', EPSG3400, [point.lng, point.lat]);
+    const dx = x - centerX;
+    const dy = y - centerY;
+    const [lon, lat] = window.proj4(EPSG3400, 'EPSG:4326', [
+      centerX + dx * cos - dy * sin,
+      centerY + dx * sin + dy * cos,
+    ]);
+    return window.L.latLng(lat, lon);
+  }, `Rotated the whole boundary ${Math.abs(deltaDegrees)}° ${deltaDegrees >= 0 ? 'clockwise' : 'counter-clockwise'}. Verify it against the imagery before confirming.`);
+}
+
 function numberValue(id) {
   const v = Number($(id).value);
   return Number.isFinite(v) ? v : null;
@@ -2625,18 +2623,6 @@ function setPdfStatus(text) {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (ch) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
-}
-
-function rememberPlanCoordinateFromFields() {
-  const lat = numberValue('latInput');
-  const lon = numberValue('lonInput');
-  state.planCoordinate = validLatLon(lat, lon) ? [lat, lon] : null;
-  updatePlacementOptions();
-}
-
-function rememberLegalFromField() {
-  state.detected.legal = $('legalInput').value.trim();
-  updatePlacementOptions();
 }
 
 function wireEvents() {
@@ -2660,17 +2646,20 @@ function wireEvents() {
   $('applyRectangle').addEventListener('click', buildRectangleFromFields);
   $('toggleAts').addEventListener('click', toggleAts);
   $('toggleDispositions')?.addEventListener('click', toggleDispositions);
+  $('toggleBoundaryAdjust')?.addEventListener('click', toggleBoundaryAdjust);
+  document.querySelectorAll('[data-boundary-move]').forEach((button) => {
+    button.addEventListener('click', () => moveBoundary(button.dataset.boundaryMove));
+  });
+  document.querySelectorAll('[data-boundary-rotate]').forEach((button) => {
+    button.addEventListener('click', () => rotateBoundary(Number(button.dataset.boundaryRotate)));
+  });
   $('fitBoundary').addEventListener('click', fitBoundary);
-  $('placementMethod')?.addEventListener('change', changeBoundaryPlacement);
   $('confirmBoundary').addEventListener('click', confirmBoundary);
   $('downloadBoundary').addEventListener('click', downloadBoundary);
 
   ['legalInput','latInput','lonInput','widthInput','heightInput','rotationInput'].forEach((id) => {
     $(id).addEventListener('input', invalidateConfirmation);
   });
-  $('latInput').addEventListener('input', rememberPlanCoordinateFromFields);
-  $('lonInput').addEventListener('input', rememberPlanCoordinateFromFields);
-  $('legalInput').addEventListener('input', rememberLegalFromField);
 }
 
 (async () => {

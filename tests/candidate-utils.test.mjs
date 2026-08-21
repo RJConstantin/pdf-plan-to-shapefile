@@ -2,9 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  automaticBoundaryPlacement,
-  availableBoundaryPlacements,
-  BOUNDARY_PLACEMENT_METHODS,
   boundaryCandidateArea,
   candidateFingerprint,
   candidatePreviewPaths,
@@ -15,7 +12,6 @@ import {
   isPlanRedColor,
   isSurveyAreaFillColor,
   rankBoundaryCandidates,
-  resolveBoundaryPlacement,
   rotateScreenOffsetQuarterTurns,
 } from '../candidate-utils.mjs';
 
@@ -51,45 +47,6 @@ test('ranks recommended overview geometry ahead of detail alternatives', () => {
     { id: 'overview', recommendationRank: 100, pageNumber: 1 },
   ]);
   assert.deepEqual(ordered.map((candidate) => candidate.id), ['overview', 'detail']);
-});
-
-test('offers only placement methods supported by the selected plan', () => {
-  const available = availableBoundaryPlacements({
-    kind: 'generic-site-plan',
-    sourceAnchor: [320, 410],
-  }, {
-    lat: 55.8,
-    lon: -115.8,
-    legal: '5-18-79-12-W5M',
-    legalTie: { distance: 120 },
-  });
-  assert.deepEqual([...available], [
-    'auto',
-    'coordinate-centre',
-    'coordinate-access-end',
-    'survey-tie',
-    'legal-centre',
-  ]);
-  assert.equal(BOUNDARY_PLACEMENT_METHODS.length, 5);
-});
-
-test('keeps automatic placement specific to each PDF candidate', () => {
-  const detected = { lat: 55.8, lon: -115.8, legal: '5-18-79-12-W5M' };
-  assert.equal(automaticBoundaryPlacement({
-    kind: 'generic-site-plan',
-    anchorKind: 'coordinate-access-end',
-    sourceAnchor: [320, 410],
-  }, detected), 'coordinate-access-end');
-  assert.equal(automaticBoundaryPlacement({
-    kind: 'generic-site-plan',
-    anchorKind: 'legal-centre',
-  }, detected), 'legal-centre');
-});
-
-test('falls back to the automatic method when an override is unavailable', () => {
-  const candidate = { kind: 'generic-site-plan', anchorKind: 'coordinate' };
-  const detected = { lat: 55.8, lon: -115.8 };
-  assert.equal(resolveBoundaryPlacement('survey-tie', candidate, detected), 'coordinate-centre');
 });
 
 test('sums multipart hectare values for display', () => {

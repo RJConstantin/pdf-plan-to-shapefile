@@ -7,11 +7,11 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>PDF Plan to Shapefile</title>
-  <link rel="stylesheet" href="./style.css?v=2026.08.21.44">
-  <script src="./onestop-jsonp-fix.js?v=2026.08.21.44" defer></script>
-  <script type="module" src="./app-v4.js?v=2026.08.21.44"></script>
-  <script type="module" src="./flattened-plan.js?v=2026.08.21.44"></script>
-  <script type="module" src="./coordinate-formats.js?v=2026.08.21.44"></script>
+  <link rel="stylesheet" href="./style.css?v=2026.08.21.45">
+  <script src="./onestop-jsonp-fix.js?v=2026.08.21.45" defer></script>
+  <script type="module" src="./app-v4.js?v=2026.08.21.45"></script>
+  <script type="module" src="./flattened-plan.js?v=2026.08.21.45"></script>
+  <script type="module" src="./coordinate-formats.js?v=2026.08.21.45"></script>
 </head>
 <body>
   <header class="topbar">
@@ -87,16 +87,6 @@
           <label>Rotation clockwise from north (°)
             <input id="rotationInput" type="number" step="0.1" value="0">
           </label>
-          <label>Boundary placement
-            <select id="placementMethod" disabled>
-              <option value="auto">Automatic for this PDF</option>
-              <option value="coordinate-centre" disabled>Plan coordinate is boundary centre</option>
-              <option value="coordinate-access-end" disabled>Plan coordinate is access / approach end</option>
-              <option value="survey-tie" disabled>Use surveyed ATS tie</option>
-              <option value="legal-centre" disabled>Use legal parcel centre</option>
-            </select>
-            <span class="field-note" id="placementHelp">Available after a plan boundary is detected.</span>
-          </label>
         </div>
 
         <div class="button-row">
@@ -129,7 +119,41 @@
         <div class="button-row map-buttons">
           <button type="button" class="secondary" id="toggleAts">ATS grid: on</button>
           <button type="button" class="secondary" id="toggleDispositions">Active dispositions: off</button>
+          <button type="button" class="secondary" id="toggleBoundaryAdjust" aria-expanded="false" disabled>Adjust boundary ▾</button>
           <button type="button" class="secondary" id="fitBoundary">Fit boundary</button>
+        </div>
+      </div>
+      <div class="boundary-adjust-panel hidden" id="boundaryAdjustPanel">
+        <div class="boundary-adjust-copy">
+          <strong>Manually adjust the whole boundary</strong>
+          <span>Move or rotate the complete polygon while checking it against the imagery.</span>
+        </div>
+        <div class="boundary-adjust-controls">
+          <div class="boundary-move-pad" aria-label="Move whole boundary">
+            <button type="button" class="north" data-boundary-move="north" title="Move north">↑</button>
+            <button type="button" class="west" data-boundary-move="west" title="Move west">←</button>
+            <button type="button" class="centre" tabindex="-1" aria-hidden="true">MOVE</button>
+            <button type="button" class="east" data-boundary-move="east" title="Move east">→</button>
+            <button type="button" class="south" data-boundary-move="south" title="Move south">↓</button>
+          </div>
+          <label>Move each click
+            <select id="boundaryMoveStep">
+              <option value="1">1 m</option>
+              <option value="5">5 m</option>
+              <option value="10" selected>10 m</option>
+              <option value="25">25 m</option>
+              <option value="50">50 m</option>
+            </select>
+          </label>
+          <div class="boundary-rotate-group">
+            <span>Rotate whole boundary</span>
+            <div class="boundary-rotate-controls">
+              <button type="button" data-boundary-rotate="-1">-1°</button>
+              <button type="button" data-boundary-rotate="-0.1">-0.1°</button>
+              <button type="button" data-boundary-rotate="0.1">+0.1°</button>
+              <button type="button" data-boundary-rotate="1">+1°</button>
+            </div>
+          </div>
         </div>
       </div>
       <div id="planMap" class="plan-map"></div>
@@ -150,6 +174,6 @@
   </main>
 
   <footer class="site-disclaimer"><strong>Disclaimer:</strong> These browser based GIS tools are intended for preliminary screening, data preparation and general reference. Results depend on the accuracy, completeness, availability and currency of the source data and services. Verify outputs against the applicable authoritative source before using them for regulatory submissions, surveying, field decisions or other professional work.</footer>
-  <div class="site-version" aria-label="Site version">v2026.08.21.44</div>
+  <div class="site-version" aria-label="Site version">v2026.08.21.45</div>
 </body>
 </html>

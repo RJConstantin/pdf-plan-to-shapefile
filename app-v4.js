@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.min.mjs';
-import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.21.43';
-import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.21.43';
-import { availableBoundaryPlacements, BOUNDARY_PLACEMENT_METHODS, boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, resolveBoundaryPlacement, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.21.43';
+import { detectCoordinateRole, detectDloPlan, detectExplicitDimensions, detectLegacyWellSiteTie, detectLegalLocation, detectLegalLocations, detectPadTraverse, detectPlanAreas, detectPlanCoordinates, detectPlanScale, detectSectionAnchors, detectSurveyDistances } from './plan-parser.mjs?v=2026.08.21.44';
+import { calibrateRingsByArea, dissolveRings, extractHatchRings, matchClosedPathsByArea } from './cad-geometry.mjs?v=2026.08.21.44';
+import { availableBoundaryPlacements, BOUNDARY_PLACEMENT_METHODS, boundaryCandidateArea, candidateFingerprint, candidatePreviewPaths, candidateRings, findProminentVectorCandidates, inferPageRotationQuarterTurns, inferPlanScaleFromVectorDimensions, isPlanRedColor, isSurveyAreaFillColor, rankBoundaryCandidates, resolveBoundaryPlacement, rotateScreenOffsetQuarterTurns } from './candidate-utils.mjs?v=2026.08.21.44';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/build/pdf.worker.min.mjs';
 
